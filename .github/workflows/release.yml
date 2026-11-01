@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the version in the code
+        run: |
+          code="v$(python3 -c 'import termwrapped; print(termwrapped.__version__)')"
+          if [ "$code" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match __version__ ($code)"; exit 1
+          fi
+      - name: Tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Build
+        run: |
+          sh build.sh
+          cd dist && sha256sum termwrapped.pyz > termwrapped.pyz.sha256 && cat termwrapped.pyz.sha256
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/termwrapped.pyz dist/termwrapped.pyz.sha256 \
+            --title "Terminal Wrapped $GITHUB_REF_NAME" --generate-notes

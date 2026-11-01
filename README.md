@@ -48,11 +48,26 @@ Any Linux with **Python 3.9+**. CI runs the tests on every push on
 ## Install
 
 ```bash
-pipx install git+https://github.com/ethembeldagli/termwrapped   # or:
-python3 termwrapped.pyz                               # single file, from Releases
+curl -fsSL https://raw.githubusercontent.com/ethembeldagli/termwrapped/main/install.sh | sh
 ```
 
-From a checkout: `python3 -m termwrapped`.
+Then run `termwrapped`. That's it: one file in `~/.local/bin`, no sudo, no pip.
+It needs Python 3.9+, which almost every distro already has (the installer
+tells you the exact command if yours doesn't).
+
+Install and start it straight away:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ethembeldagli/termwrapped/main/install.sh | sh -s -- --run
+```
+
+Installer options: `--run`, `--version v0.1.0`, `--bin-dir DIR`, `--uninstall`.
+Like to read scripts before piping them into a shell? Good habit:
+[install.sh](install.sh) is plain POSIX sh, and it verifies release checksums.
+
+Other ways: `pipx install git+https://github.com/ethembeldagli/termwrapped`,
+the single-file `termwrapped.pyz` from [Releases](https://github.com/ethembeldagli/termwrapped/releases)
+(`python3 termwrapped.pyz`), or `python3 -m termwrapped` from a checkout.
 
 ## Options
 
@@ -87,8 +102,14 @@ The card is always written as SVG. For a PNG, termwrapped uses the first one
 it finds of `rsvg-convert`, `gdk-pixbuf-thumbnailer` (most GNOME desktops),
 Inkscape, `ksvgtopng` (KDE), Chromium/Chrome, Firefox, or ImageMagick.
 
-## Build the single-file release
+## Releasing
+
+Bump `__version__` in `termwrapped/__init__.py`, then push a matching tag:
 
 ```bash
-./build.sh   # -> dist/termwrapped.pyz
+git tag v0.1.0 && git push origin v0.1.0
 ```
+
+GitHub Actions tests it, builds `termwrapped.pyz` with a SHA-256 checksum and
+publishes the release, which the installer picks up automatically. To build
+locally: `./build.sh` (writes `dist/termwrapped.pyz`).

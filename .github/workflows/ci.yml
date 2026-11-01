@@ -47,3 +47,20 @@ jobs:
           python3 tests/fixtures.py /tmp/demo
           HOME=/tmp/demo python3 dist/termwrapped.pyz --year 2025 --plain --card /tmp/card.svg
           test -s /tmp/card.svg
+      - name: install.sh from this checkout, then uninstall
+        run: |
+          sh install.sh --from . --bin-dir /tmp/twbin
+          /tmp/twbin/termwrapped --version
+          sh install.sh --uninstall --bin-dir /tmp/twbin
+          test ! -e /tmp/twbin/termwrapped
+      - name: install.sh from GitHub, like curl | sh
+        if: github.ref == 'refs/heads/main'
+        run: |
+          if command -v curl >/dev/null || command -v wget >/dev/null; then
+            cat install.sh | sh
+            termwrapped --version
+          else
+            echo "This image has no curl or wget: check we explain that clearly."
+            ! sh install.sh 2>/tmp/err.txt
+            grep "curl nor wget" /tmp/err.txt
+          fi
