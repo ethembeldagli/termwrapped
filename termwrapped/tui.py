@@ -321,57 +321,12 @@ class Screen:
 
     def draw(self, slide: Slide, t: float, index: int, count: int, prev_theme: str | None) -> None:
         width, height = shutil.get_terminal_size((80, 24))
-        theme = tuple(hex_rgb(c) for c in THEMES[slide.theme])
-        old = tuple(hex_rgb(c) for c in THEMES[prev_theme or slide.theme])
-        fade = ease_out(t / INTRO) if prev_theme else 1.0
-        top_c, bot_c = lerp(old[0], theme[0], fade), lerp(old[1], theme[1], fade)
-
-        content = layout(slide, t, width, height)
-        # Centre each row, but left-align a block of bar/list rows together.
-        body_h = len(content)
-        y0 = max(2, (height - body_h) // 2)
-
-        grid: list[list] = [[(" ", WHITE, False)] * width for _ in range(height)]
-
-        def put(y: int, x: int, segs) -> None:
-            if not 0 <= y < height:
-                return
-            for text, colour, bold in segs:
-                for ch in text:
-                    w = cell_width(ch)
-                    if 0 <= x < width - (w - 1):
-                        grid[y][x] = (ch, colour, bold)
-                        if w == 2:
-                            grid[y][x + 1] = ("", colour, bold)
-                    x += w
-
-        for i, segs in enumerate(content):
-            w = sum(text_width(s[0]) for s in segs)
-            put(y0 + i, max(0, (width - w) // 2), segs)
-
-        # Story-style progress bar on the first row.
-        seg_w = max(1, (width - 4 - (count - 1)) // count)
-        x = 2
-        dur = slide_duration(slide)
-        for i in range(count):
-            if i < index:
-                fill = seg_w
-            elif i == index:
-                fill = max(1, round(seg_w * min(1.0, t / dur)))
-            else:
-                fill = 0
-            put(0, x, [("━" * fill, WHITE, False), ("━" * (seg_w - fill), lerp(WHITE, top_c, 0.7), False)])
-            x += seg_w + 1
-
-        hint = "◂ back    space ▸ next    q quit"
-        put(height - 1, max(0, (width - len(hint)) // 2), [(hint, lerp(WHITE, bot_c, 0.35), False)])
-
+        grid, backgrounds = compose(slide, t, index, count, prev_theme, width, height)
         buf = ["\x1b[H"]
-        for y in range(height):
-            bg = lerp(top_c, bot_c, y / max(1, height - 1))
-            buf.append(f"\x1b[{y + 1};1H" + self.pal.bg(bg))
+        for y, row in enumerate(grid):
+            buf.append(f"\x1b[{y + 1};1H" + self.pal.bg(backgrounds[y]))
             cur = None
-            for ch, colour, bold in grid[y]:
+            for ch, colour, bold in row:
                 if ch == "":
                     continue
                 key = (colour, bold)
@@ -382,6 +337,58 @@ class Screen:
         buf.append("\x1b[0m")
         self.out.write("".join(buf))
         self.out.flush()
+
+
+def compose(slide: Slide, t: float, index: int, count: int, prev_theme: str | None,
+            width: int, height: int) -> tuple[list[list], list[RGB]]:
+    """Lay out one frame: a grid of (char, colour, bold) cells plus each row's
+    background colour. Kept separate from drawing so frames can be rendered
+    to images too (see docs/make_demo.py)."""
+    theme = tuple(hex_rgb(c) for c in THEMES[slide.theme])
+    old = tuple(hex_rgb(c) for c in THEMES[prev_theme or slide.theme])
+    fade = ease_out(t / INTRO) if prev_theme else 1.0
+    top_c, bot_c = lerp(old[0], theme[0], fade), lerp(old[1], theme[1], fade)
+
+    content = layout(slide, t, width, height)
+    y0 = max(2, (height - len(content)) // 2)
+    grid: list[list] = [[(" ", WHITE, False)] * width for _ in range(height)]
+
+    def put(y: int, x: int, segs) -> None:
+        if not 0 <= y < height:
+            return
+        for text, colour, bold in segs:
+            for ch in text:
+                w = cell_width(ch)
+                if 0 <= x < width - (w - 1):
+                    grid[y][x] = (ch, colour, bold)
+                    if w == 2:
+                        grid[y][x + 1] = ("", colour, bold)
+                x += w
+
+    # Every row is centred on its own.
+    for i, segs in enumerate(content):
+        w = sum(text_width(s[0]) for s in segs)
+        put(y0 + i, max(0, (width - w) // 2), segs)
+
+    # Story-style progress bar on the first row.
+    seg_w = max(1, (width - 4 - (count - 1)) // count)
+    x = 2
+    dur = slide_duration(slide)
+    for i in range(count):
+        if i < index:
+            fill = seg_w
+        elif i == index:
+            fill = max(1, round(seg_w * min(1.0, t / dur)))
+        else:
+            fill = 0
+        put(0, x, [("━" * fill, WHITE, False), ("━" * (seg_w - fill), lerp(WHITE, top_c, 0.7), False)])
+        x += seg_w + 1
+
+    hint = "◂ back    space ▸ next    q quit"
+    put(height - 1, max(0, (width - len(hint)) // 2), [(hint, lerp(WHITE, bot_c, 0.35), False)])
+
+    backgrounds = [lerp(top_c, bot_c, y / max(1, height - 1)) for y in range(height)]
+    return grid, backgrounds
 
 
 def _read_key(fd: int, timeout: float) -> str | None:

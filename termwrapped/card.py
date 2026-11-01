@@ -13,8 +13,12 @@ from termwrapped import PROJECT_URL
 from termwrapped.insights import THEMES, Wrapped
 
 W, H = 1080, 1350
-SANS = "Inter, 'Noto Sans', 'DejaVu Sans', 'Liberation Sans', Arial, sans-serif"
-MONO = "'JetBrains Mono', 'Fira Code', 'DejaVu Sans Mono', 'Noto Sans Mono', monospace"
+# Best-looking fonts first; every Linux box has at least one of the last few.
+SANS = ("Inter, 'Adwaita Sans', Geist, 'Noto Sans', 'Open Sans', Roboto, Ubuntu, Cantarell, "
+        "'DejaVu Sans', 'Liberation Sans', sans-serif")
+MONO = ("'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Source Code Pro', 'Noto Sans Mono', "
+        "'Adwaita Mono', 'DejaVu Sans Mono', 'Liberation Mono', monospace")
+BASIC_RENDERERS = ("magick", "convert")  # ImageMagick's built-in SVG support
 
 
 def _rgb(h: str) -> tuple[int, int, int]:
@@ -36,20 +40,11 @@ def _text(x, y, s, size, fill="#ffffff", weight=400, family=SANS, anchor="start"
     )
 
 
-def _gradient_text(x, y, s, size, c1, c2, weight=800, family=SANS):
-    """Per-character colours: a gradient every renderer can draw."""
-    n = max(1, len(s) - 1)
-    spans, gap = [], 0.0
-    for i, ch in enumerate(s):
-        if ch == " ":
-            # Some renderers collapse whitespace-only tspans, so spaces become offsets.
-            gap += size * 0.3
-            continue
-        dx = f' dx="{gap:.0f}"' if gap else ""
-        spans.append(f'<tspan{dx} fill="{_mix(c2, c1, i / n)}">{escape(ch)}</tspan>')
-        gap = 0.0
-    spans = "".join(spans)
-    return f'<text x="{x}" y="{y}" font-family="{family}" font-size="{size}" font-weight="{weight}">{spans}</text>'
+def _gradient(gid: str, c1: str, c2: str) -> str:
+    return (
+        f'<linearGradient id="{gid}" x1="0" y1="0" x2="1" y2="0">'
+        f'<stop offset="0" stop-color="{c1}"/><stop offset="1" stop-color="{c2}"/></linearGradient>'
+    )
 
 
 def _fit(s: str, size: float, max_w: float, char_w: float = 0.6) -> str:
@@ -68,7 +63,9 @@ def _title_layout(title: str, max_w: int) -> tuple[int, list[str]]:
     return 72, [" ".join(words[:best]), " ".join(words[best:])]
 
 
-def render_svg(w: Wrapped) -> str:
+def render_svg(w: Wrapped, basic: bool = False) -> str:
+    """basic=True avoids what ImageMagick's own SVG renderer gets wrong
+    (gradients, <tspan> positioning), at the cost of a plain-coloured title."""
     bg1, bg2, accent, accent2 = THEMES[w.archetype.theme]
     top = _mix("#ffffff", bg1, 0.08)
     win = "#0b0b12"
@@ -77,6 +74,8 @@ def render_svg(w: Wrapped) -> str:
 
     o: list[str] = []
     o.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">')
+    if not basic:
+        o.append("<defs>" + _gradient("title", accent, accent2) + "</defs>")
     # background gradient as overlapping bands
     bands = 60
     for i in range(bands):
@@ -104,19 +103,18 @@ def render_svg(w: Wrapped) -> str:
     if len(who) + 4 + len(cmd) > max_chars:
         cmd = "termwrapped"
     who = _fit(who, 30, (max_chars - 4 - len(cmd)) * 18, 0.6)
-    o.append(
-        f'<text x="{x0}" y="{y}" font-family="{MONO}" font-size="30">'
-        f'<tspan fill="{accent}" font-weight="700">{escape(who)}</tspan>'
-        f'<tspan fill="{soft(0.6)}">:~$</tspan>'
-        f'<tspan dx="18" fill="{soft(0.9)}">{escape(cmd)}</tspan></text>'
-    )
+    # Separate elements at monospace offsets (30px * 0.6 per character):
+    # every renderer places those correctly, unlike <tspan> runs.
+    o.append(_text(x0, y, who, 30, accent, 700, MONO))
+    o.append(_text(x0 + len(who) * 18, y, ":~$", 30, soft(0.6), 400, MONO))
+    o.append(_text(x0 + (len(who) + 4) * 18, y, cmd, 30, soft(0.9), 400, MONO))
 
     y += 80
     o.append(_text(x0, y, f"MY {w.year} TERMINAL PERSONALITY", 24, soft(0.6), 700))
     size, lines = _title_layout(w.archetype.title, inner)
     for line in lines:
         y += size + 10
-        o.append(_gradient_text(x0, y, line, size, accent, accent2))
+        o.append(_text(x0, y, line, size, accent if basic else "url(#title)", 800))
     y += 56
     o.append(_text(x0, y, _fit(w.archetype.tagline, 30, inner, 0.5), 30, soft(0.8), 400, SANS, extra='font-style="italic"'))
 
@@ -159,8 +157,9 @@ def render_svg(w: Wrapped) -> str:
     return "\n".join(o)
 
 
-def _converters(svg: str, png: str) -> list[list[str]]:
+def _converters(svg: str, png: str, width: int, height: int) -> list[list[str]]:
     url = "file://" + os.path.abspath(svg)
+    W, H = width, height  # noqa: N806
     cmds = [
         ["rsvg-convert", "-w", str(W), "-h", str(H), "-o", png, svg],
         # ships with gdk-pixbuf on GNOME desktops and renders through librsvg
@@ -180,11 +179,14 @@ def _converters(svg: str, png: str) -> list[list[str]]:
     return cmds
 
 
-def svg_to_png(svg: str, png: str) -> str | None:
-    """Try converters from best to worst quality. Returns the tool used."""
-    for cmd in _converters(svg, png):
+def svg_to_png(svg: str, png: str, width: int = W, height: int = H, basic_svg: str | None = None) -> str | None:
+    """Try converters from best to worst quality. Returns the tool used.
+    ImageMagick gets basic_svg instead, when one is given."""
+    for cmd in _converters(svg, png, width, height):
         if not shutil.which(cmd[0]):
             continue
+        if basic_svg and cmd[0] in BASIC_RENDERERS:
+            cmd = [basic_svg if part == svg else part for part in cmd]
         try:
             if os.path.exists(png):
                 os.remove(png)
@@ -221,7 +223,10 @@ def save(w: Wrapped, path: str) -> tuple[str, str | None]:
         return svg_path, None
     with tempfile.TemporaryDirectory() as tmp:
         tmp_png = os.path.join(tmp, "card.png")
-        tool = svg_to_png(svg_path, tmp_png)
+        basic = os.path.join(tmp, "basic.svg")
+        with open(basic, "w", encoding="utf-8") as f:
+            f.write(render_svg(w, basic=True))
+        tool = svg_to_png(svg_path, tmp_png, basic_svg=basic)
         if tool:
             shutil.move(tmp_png, base + ".png")
             return base + ".png", tool

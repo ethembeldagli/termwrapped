@@ -109,6 +109,24 @@ def steam(home: str) -> None:
 ''')
 
 
+DEMO_GAMES = [
+    ("1091500", "Cyberpunk 2077", 9120), ("1145360", "Hades", 3260),
+    ("413150", "Stardew Valley", 2890), ("1245620", "Elden Ring", 2410),
+    ("367520", "Hollow Knight", 1150),
+]
+
+
+def steam_demo(home: str) -> None:
+    root = os.path.join(home, ".local/share/Steam")
+    apps = ""
+    for appid, name, minutes in DEMO_GAMES:
+        write(os.path.join(root, f"steamapps/appmanifest_{appid}.acf"),
+              f'"AppState"\n{{\n\t"appid"\t\t"{appid}"\n\t"name"\t\t"{name}"\n}}\n')
+        apps += f'"{appid}" {{ "LastPlayed" "{ts(11, 20, 21)}" "Playtime" "{minutes}" }}\n'
+    write(os.path.join(root, "userdata/42/config/localconfig.vdf"),
+          '"UserLocalConfigStore" { "Software" { "Valve" { "Steam" { "apps" { ' + apps + ' } } } } }')
+
+
 def small_home(home: str) -> None:
     """Exactly countable data used by the tests."""
     bash_history(os.path.join(home, ".bash_history"))
@@ -140,7 +158,7 @@ def demo_home(home: str) -> None:
     lines.sort()
     write(os.path.join(home, ".bash_history"), "".join(f"#{t}\n{c}\n" for t, c in lines))
     git_repo(os.path.join(home, "code/demo"))
-    steam(home)
+    steam_demo(home)
 
 
 if __name__ == "__main__":

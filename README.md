@@ -9,6 +9,8 @@ curl -fsSL https://raw.githubusercontent.com/ethembeldagli/termwrapped/main/inst
 termwrapped
 ```
 
+<p align="center"><img src="docs/demo.gif" alt="Terminal Wrapped: an animated slideshow of your year in the terminal" width="800"></p>
+
 <img src="docs/example-card.png" alt="Example share card: The Vim Monk" width="420" align="right">
 
 Run one command and get an animated year-in-review of your shell, git, packages
