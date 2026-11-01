@@ -36,6 +36,7 @@ step() { printf '  %s›%s %s… ' "$D" "$R" "$1"; STEP_OPEN=1; }
 ok() { STEP_OPEN=0; if [ -n "${1:-}" ]; then printf '%s✓%s %s%s%s\n' "$GRN" "$R" "$D" "$1" "$R"; else printf '%s✓%s\n' "$GRN" "$R"; fi; }
 warn() { STEP_OPEN=0; printf '%s!%s %s\n' "$YEL" "$R" "$1"; }
 die() {
+    ui_stop
     if [ "$STEP_OPEN" = 1 ]; then printf '\n' >&2; fi
     printf '\n  %s✗ %s%s\n' "$RED$B" "$1" "$R" >&2
     shift
@@ -44,6 +45,386 @@ die() {
     exit 1
 }
 has() { command -v "$1" >/dev/null 2>&1; }
+
+# >>> fullscreen ui >>>
+# A full-screen, full-colour menu in the style of Terminal Wrapped's slides,
+# shared by the ethembeldagli installers. When the terminal can't show it
+# (too small, no colour, not interactive) the plain text menu is used instead.
+# UI_THEME is "TOP|BOTTOM|ACCENT|ACCENT2", each colour as "R G B".
+
+UI_ESC=$(printf '\033')
+UI_CR=$(printf '\r')
+UI_NL='
+'
+UI_ACTIVE=0
+UI_CLEANUP=""
+UI_LOG=""
+UI_SEL=1
+UI_TRUE=0 UI_STTY="" UI_PREPARED="" UI_KEY="" UI_CHOICE="" UI_TICK=0
+UI_TITLE="" UI_RIGHT="" UI_SUB="" UI_LINES="" UI_OPTS="" UI_FOOT="" UI_BRAND=""
+
+# ui_supported: can this terminal show the full-screen menu?
+ui_supported() {
+    [ -z "${NO_COLOR:-}" ] || return 1
+    [ -z "${PLAIN_INSTALLER:-}" ] || return 1
+    case "${TERM:-dumb}" in dumb | linux | vt*) return 1 ;; esac
+    case "${COLORTERM:-}" in
+        truecolor | 24bit) UI_TRUE=1 ;;
+        *) case "${TERM:-}" in *256col* | xterm-kitty | alacritty | wezterm | foot*) UI_TRUE=0 ;; *) return 1 ;; esac ;;
+    esac
+    [ -t 1 ] || return 1
+    ( : </dev/tty ) 2>/dev/null || return 1
+    command -v stty >/dev/null 2>&1 && command -v dd >/dev/null 2>&1 || return 1
+    ui_size || return 1
+    [ "$UI_COLS" -ge 60 ] && [ "$UI_ROWS" -ge 20 ]
+}
+
+ui_size() {
+    _ui_size=$(stty size </dev/tty 2>/dev/null) || return 1
+    UI_ROWS=${_ui_size% *} UI_COLS=${_ui_size#* }
+    case "$UI_ROWS$UI_COLS" in '' | *[!0-9]*) return 1 ;; esac
+    [ "$UI_ROWS" -gt 0 ]
+}
+
+# ui_sgr 38|48 R G B -> UI_C, the escape for that foreground/background colour
+ui_sgr() {
+    if [ "$UI_TRUE" = 1 ]; then
+        UI_C="${UI_ESC}[$1;2;$2;$3;$4m"
+    else
+        UI_C="${UI_ESC}[$1;5;$((16 + 36 * (($2 * 5 + 127) / 255) + 6 * (($3 * 5 + 127) / 255) + ($4 * 5 + 127) / 255))m"
+    fi
+}
+
+# ui_mix "R G B" "R G B" STEP STEPS -> _ui_r _ui_g _ui_b
+ui_mix() {
+    # shellcheck disable=SC2086 # split the colours into their parts
+    set -- $1 $2 "$3" "$4"
+    _ui_r=$(($1 + ($4 - $1) * $7 / $8))
+    _ui_g=$(($2 + ($5 - $2) * $7 / $8))
+    _ui_b=$(($3 + ($6 - $3) * $7 / $8))
+}
+
+# ui_prepare: colours for this theme and terminal size.
+ui_prepare() {
+    _ui_old_ifs=$IFS
+    IFS='|'
+    # shellcheck disable=SC2086 # split the theme into its four colours
+    set -- $UI_THEME
+    IFS=$_ui_old_ifs
+    UI_TOP=$1 UI_BOTTOM=$2 UI_ACC=$3 UI_ACC2=$4
+    _ui_y=1
+    while [ "$_ui_y" -le "$UI_ROWS" ]; do
+        ui_mix "$UI_TOP" "$UI_BOTTOM" "$((_ui_y - 1))" "$((UI_ROWS > 1 ? UI_ROWS - 1 : 1))"
+        ui_sgr 48 "$_ui_r" "$_ui_g" "$_ui_b"
+        eval "UI_BG_$_ui_y=\$UI_C"
+        _ui_y=$((_ui_y + 1))
+    done
+    ui_sgr 38 240 240 255 && UI_FG_C=$UI_C
+    ui_mix "240 240 255" "$UI_TOP" 45 100 && ui_sgr 38 "$_ui_r" "$_ui_g" "$_ui_b" && UI_DIM_C=$UI_C
+    # shellcheck disable=SC2086
+    ui_sgr 38 $UI_ACC && UI_ACC_C=$UI_C
+    # shellcheck disable=SC2086
+    ui_sgr 38 $UI_ACC2 && UI_ACC2_C=$UI_C
+    ui_sgr 38 124 255 178 && UI_GOOD_C=$UI_C
+    ui_sgr 38 255 206 92 && UI_WARN_C=$UI_C
+    ui_sgr 38 255 112 120 && UI_BAD_C=$UI_C
+    # shellcheck disable=SC2086
+    ui_sgr 48 $UI_ACC && UI_BAR_BG=$UI_C
+    # shellcheck disable=SC2086
+    ui_sgr 38 $UI_BOTTOM && UI_BAR_FG=$UI_C
+    UI_BLANK=""
+    _ui_x=0
+    while [ "$_ui_x" -lt "$UI_COLS" ]; do UI_BLANK="$UI_BLANK "; _ui_x=$((_ui_x + 1)); done
+    UI_W=$((UI_COLS - 8))
+    [ "$UI_W" -gt 66 ] && UI_W=66
+    UI_X=$(((UI_COLS - UI_W) / 2 + 1))
+    UI_PREPARED="$UI_ROWS:$UI_COLS"
+    return 0
+}
+
+ui_start() {
+    [ "$UI_ACTIVE" = 1 ] && return 0
+    UI_STTY=$(stty -g </dev/tty)
+    stty -echo -icanon min 0 time 5 </dev/tty
+    printf '%s[?1049h%s[?25l%s[?7l' "$UI_ESC" "$UI_ESC" "$UI_ESC"
+    UI_ACTIVE=1
+    UI_PREPARED=""
+    trap 'ui_stop; eval "${UI_CLEANUP:-:}"' EXIT
+    trap 'ui_stop; exit 130' INT TERM HUP
+    return 0
+}
+
+ui_stop() {
+    [ "$UI_ACTIVE" = 1 ] || return 0
+    printf '%s[0m%s[?7h%s[?25h%s[?1049l' "$UI_ESC" "$UI_ESC" "$UI_ESC" "$UI_ESC"
+    stty "$UI_STTY" </dev/tty 2>/dev/null || true
+    UI_ACTIVE=0
+    return 0
+}
+
+# ui_put ROW COL TEXT: add TEXT at ROW, COL on top of that row's background.
+ui_put() {
+    [ "$1" -ge 1 ] && [ "$1" -le "$UI_ROWS" ] || return 0
+    _ui_bg=""
+    eval "_ui_bg=\$UI_BG_$1"
+    UI_FRAME="$UI_FRAME${UI_ESC}[$1;$2H$_ui_bg$3"
+}
+
+# ui_draw: draw UI_TITLE, UI_SUB, UI_LINES, UI_OPTS and UI_FOOT, centred on the
+# gradient. UI_LINES holds "info|label|value|tone", "text|tone|text",
+# "log|text", "spin|text" or "blank" lines; UI_OPTS holds "key|label|hint".
+ui_draw() {
+    ui_size || return 0
+    [ "$UI_PREPARED" = "$UI_ROWS:$UI_COLS" ] || ui_prepare
+    UI_FRAME="${UI_ESC}[0m"
+    _ui_y=1
+    while [ "$_ui_y" -le "$UI_ROWS" ]; do
+        ui_put "$_ui_y" 1 "$UI_BLANK"
+        _ui_y=$((_ui_y + 1))
+    done
+
+    _ui_count=4
+    [ -n "$UI_LINES" ] && _ui_count=$((_ui_count + $(printf '%s\n' "$UI_LINES" | grep -c '') + 1))
+    [ -n "$UI_OPTS" ] && _ui_count=$((_ui_count + $(printf '%s\n' "$UI_OPTS" | grep -c '') + 1))
+    [ -n "$UI_FOOT" ] && _ui_count=$((_ui_count + 2))
+    _ui_y=$(((UI_ROWS - _ui_count) / 2 + 1))
+    [ "$_ui_y" -lt 2 ] && _ui_y=2
+    _ui_x=$UI_X
+
+    # Title, version on the right, subtitle and a gradient rule.
+    ui_put "$_ui_y" "$_ui_x" "$UI_ACC_C${UI_ESC}[1m◆ $UI_FG_C$UI_TITLE${UI_ESC}[22m"
+    if [ -n "$UI_RIGHT" ]; then
+        ui_put "$_ui_y" "$((_ui_x + UI_W - ${#UI_RIGHT}))" "$UI_DIM_C$UI_RIGHT"
+    fi
+    _ui_y=$((_ui_y + 1))
+    ui_put "$_ui_y" "$_ui_x" "$UI_DIM_C$UI_SUB"
+    _ui_y=$((_ui_y + 1))
+    _ui_rule=""
+    _ui_i=0
+    while [ "$_ui_i" -lt "$UI_W" ]; do
+        ui_mix "$UI_ACC" "$UI_ACC2" "$_ui_i" "$UI_W"
+        ui_sgr 38 "$_ui_r" "$_ui_g" "$_ui_b"
+        _ui_rule="$_ui_rule$UI_C━"
+        _ui_i=$((_ui_i + 1))
+    done
+    ui_put "$_ui_y" "$_ui_x" "$_ui_rule"
+    _ui_y=$((_ui_y + 2))
+
+    if [ -n "$UI_LINES" ]; then
+        while IFS='|' read -r _ui_kind _ui_a _ui_b _ui_c; do
+            case "$_ui_kind" in
+                info)
+                    ui_tone "$_ui_c"
+                    _ui_label=$(printf '%-12s' "$_ui_a")
+                    ui_put "$_ui_y" "$_ui_x" "$UI_DIM_C$_ui_label $_ui_tone$_ui_b"
+                    ;;
+                text) ui_tone "$_ui_a" && ui_put "$_ui_y" "$_ui_x" "$_ui_tone$_ui_b" ;;
+                big) ui_tone "$_ui_a" && ui_put "$_ui_y" "$_ui_x" "$_ui_tone${UI_ESC}[1m$_ui_b${UI_ESC}[22m" ;;
+                log) ui_put "$_ui_y" "$((_ui_x + 2))" "$UI_DIM_C$_ui_a" ;;
+                spin)
+                    ui_spinner
+                    ui_put "$_ui_y" "$_ui_x" "$UI_ACC2_C$_ui_spin $UI_FG_C${UI_ESC}[1m$_ui_a${UI_ESC}[22m"
+                    ;;
+            esac
+            _ui_y=$((_ui_y + 1))
+        done <<EOF
+$UI_LINES
+EOF
+        _ui_y=$((_ui_y + 1))
+    fi
+
+    if [ -n "$UI_OPTS" ]; then
+        _ui_i=1
+        while IFS='|' read -r _ui_key _ui_label _ui_hint; do
+            _ui_text="$_ui_label${_ui_hint:+  $_ui_hint}"
+            _ui_pad=$((UI_W - ${#_ui_text} - 7))
+            [ "$_ui_pad" -lt 1 ] && _ui_pad=1
+            if [ "$_ui_i" = "$UI_SEL" ]; then
+                ui_put "$_ui_y" "$_ui_x" "$UI_BAR_BG$UI_BAR_FG${UI_ESC}[1m ▸ $_ui_label${UI_ESC}[22m${_ui_hint:+  $_ui_hint}$(printf "%${_ui_pad}s" '')$_ui_key   "
+            else
+                ui_put "$_ui_y" "$_ui_x" "   $UI_FG_C$_ui_label$UI_DIM_C${_ui_hint:+  $_ui_hint}$(printf "%${_ui_pad}s" '')$_ui_key"
+            fi
+            _ui_i=$((_ui_i + 1))
+            _ui_y=$((_ui_y + 1))
+        done <<EOF
+$UI_OPTS
+EOF
+        _ui_y=$((_ui_y + 1))
+    fi
+
+    if [ -n "$UI_FOOT" ]; then
+        _ui_y=$((_ui_y + 1))
+        ui_put "$_ui_y" "$_ui_x" "$UI_DIM_C$UI_FOOT"
+    fi
+    if [ -n "$UI_BRAND" ] && [ "$_ui_y" -lt "$((UI_ROWS - 1))" ]; then
+        ui_put "$UI_ROWS" "$(((UI_COLS - ${#UI_BRAND}) / 2 + 1))" "$UI_DIM_C$UI_BRAND"
+    fi
+    printf '%s' "$UI_FRAME"
+    return 0
+}
+
+ui_tone() {
+    case "$1" in
+        good) _ui_tone=$UI_GOOD_C ;;
+        warn) _ui_tone=$UI_WARN_C ;;
+        bad) _ui_tone=$UI_BAD_C ;;
+        dim) _ui_tone=$UI_DIM_C ;;
+        accent) _ui_tone=$UI_ACC_C ;;
+        accent2) _ui_tone=$UI_ACC2_C ;;
+        *) _ui_tone=$UI_FG_C ;;
+    esac
+    return 0
+}
+
+ui_spinner() {
+    case $((${UI_TICK:-0} % 10)) in
+        0) _ui_spin="⠋" ;; 1) _ui_spin="⠙" ;; 2) _ui_spin="⠹" ;; 3) _ui_spin="⠸" ;; 4) _ui_spin="⠼" ;;
+        5) _ui_spin="⠴" ;; 6) _ui_spin="⠦" ;; 7) _ui_spin="⠧" ;; 8) _ui_spin="⠇" ;; *) _ui_spin="⠏" ;;
+    esac
+    return 0
+}
+
+# ui_key: wait up to half a second for a key; sets UI_KEY to up, down, enter,
+# esc, char:X or "" when nothing was pressed.
+ui_key() {
+    _ui_k=$(dd bs=1 count=1 2>/dev/null </dev/tty; echo .)
+    _ui_k=${_ui_k%.}
+    case "$_ui_k" in
+        "") UI_KEY="" ;;
+        "$UI_ESC")
+            stty min 0 time 1 </dev/tty
+            _ui_seq=$(dd bs=8 count=1 2>/dev/null </dev/tty)
+            stty min 0 time 5 </dev/tty
+            case "$_ui_seq" in
+                "[A" | OA) UI_KEY=up ;;
+                "[B" | OB) UI_KEY=down ;;
+                "") UI_KEY=esc ;;
+                *) UI_KEY=other ;;
+            esac
+            ;;
+        "$UI_NL" | "$UI_CR" | " ") UI_KEY=enter ;;
+        *) UI_KEY="char:$(printf '%s' "$_ui_k" | tr '[:upper:]' '[:lower:]')" ;;
+    esac
+    return 0
+}
+
+# ui_choose: show the menu until something is picked; sets UI_CHOICE to the
+# key of the option, or "esc".
+ui_choose() {
+    _ui_n=$(printf '%s\n' "$UI_OPTS" | grep -c '')
+    [ "$UI_SEL" -ge 1 ] && [ "$UI_SEL" -le "$_ui_n" ] || UI_SEL=1
+    UI_FOOT="↑↓ move · enter select · or press a key"
+    ui_draw
+    while :; do
+        _ui_before="$UI_ROWS:$UI_COLS"
+        ui_key
+        case "$UI_KEY" in
+            "") ui_size && [ "$UI_ROWS:$UI_COLS" != "$_ui_before" ] && ui_draw ;;
+            up) UI_SEL=$((UI_SEL > 1 ? UI_SEL - 1 : _ui_n)) && ui_draw ;;
+            down) UI_SEL=$((UI_SEL < _ui_n ? UI_SEL + 1 : 1)) && ui_draw ;;
+            enter)
+                UI_CHOICE=$(printf '%s\n' "$UI_OPTS" | sed -n "${UI_SEL}p" | cut -d'|' -f1)
+                return 0
+                ;;
+            esc) UI_CHOICE=esc && return 0 ;;
+            char:*)
+                _ui_letter=${UI_KEY#char:}
+                if printf '%s\n' "$UI_OPTS" | grep -q "^$_ui_letter|"; then
+                    UI_CHOICE=$_ui_letter
+                    return 0
+                fi
+                case "$_ui_letter" in
+                    k) UI_SEL=$((UI_SEL > 1 ? UI_SEL - 1 : _ui_n)) && ui_draw ;;
+                    j) UI_SEL=$((UI_SEL < _ui_n ? UI_SEL + 1 : 1)) && ui_draw ;;
+                esac
+                ;;
+        esac
+    done
+}
+
+# ui_ask QUESTION DETAIL DEFAULT(y|n): a full-screen yes/no question.
+ui_ask() {
+    _ui_saved_lines=$UI_LINES _ui_saved_opts=$UI_OPTS _ui_saved_sel=$UI_SEL
+    UI_LINES="big|accent2|$1"
+    [ -n "$2" ] && UI_LINES="$UI_LINES${UI_NL}text||$2"
+    UI_OPTS="y|Yes|${UI_NL}n|No|"
+    if [ "$3" = y ]; then UI_SEL=1; else UI_SEL=2; fi
+    ui_choose
+    UI_LINES=$_ui_saved_lines UI_OPTS=$_ui_saved_opts UI_SEL=$_ui_saved_sel
+    [ "$UI_CHOICE" = y ]
+}
+
+# ui_busy TEXT: a full-screen "please wait" while something quick runs.
+ui_busy() {
+    UI_LINES="spin|$1" UI_OPTS="" UI_FOOT=""
+    ui_draw
+    return 0
+}
+
+# ui_run TITLE COMMAND...: run COMMAND with its output going to a log, showing
+# the latest lines on a progress screen, then the result. Returns its status.
+ui_run() {
+    _ui_title=$1
+    shift
+    UI_LOG=$(mktemp "${TMPDIR:-/tmp}/installer.XXXXXX") || return 1
+    # The job can't touch the screen: it runs with the full-screen view marked
+    # inactive and its questions answered by their defaults.
+    # shellcheck disable=SC2030,SC2034 # UI_IN_JOB is only for the job, read by the installers' own functions
+    (UI_ACTIVE=0 UI_IN_JOB=1 && "$@") </dev/null >"$UI_LOG" 2>&1 &
+    _ui_pid=$!
+    UI_TICK=0
+    UI_OPTS="" UI_FOOT=""
+    while kill -0 "$_ui_pid" 2>/dev/null; do
+        UI_LINES="spin|$_ui_title$(ui_log_lines)"
+        ui_draw
+        UI_TICK=$((UI_TICK + 1))
+        sleep 0.12 2>/dev/null || sleep 1
+    done
+    _ui_status=0
+    wait "$_ui_pid" || _ui_status=$?
+    if [ "$_ui_status" = 0 ]; then
+        UI_LINES="big|good|✓ Done$(ui_log_lines)"
+    else
+        UI_LINES="big|bad|✗ That didn't work$(ui_log_lines)"
+    fi
+    UI_FOOT="Press any key to close"
+    ui_draw
+    UI_KEY=""
+    while [ -z "$UI_KEY" ]; do ui_key; done
+    return "$_ui_status"
+}
+
+# The last lines of the log, without colours, as "log|..." lines.
+ui_log_lines() {
+    _ui_max=$((UI_ROWS - 16))
+    [ "$_ui_max" -gt 10 ] && _ui_max=10
+    [ "$_ui_max" -lt 3 ] && _ui_max=3
+    printf '\nblank'
+    tail -n 40 "$UI_LOG" 2>/dev/null | tr "$UI_CR" '\n' \
+        | sed -e "s/$UI_ESC\[[0-9;?]*[A-Za-z]//g" -e 's/^ *//' -e '/^$/d' -e 's/|/¦/g' \
+        | fold -s -w "$((UI_W - 4))" | sed -e 's/^ *//' -e '/^$/d' \
+        | tail -n "$_ui_max" | sed -e 's/^/log|/' \
+        | while IFS= read -r _ui_line; do printf '\n%s' "$_ui_line"; done
+    return 0
+}
+
+# ui_finish: leave the full-screen view and print what the last ui_run did,
+# so it stays in the terminal's scrollback.
+ui_finish() {
+    ui_stop
+    if [ -n "$UI_LOG" ] && [ -f "$UI_LOG" ]; then
+        printf '\n'
+        cat "$UI_LOG"
+        rm -f "$UI_LOG"
+        UI_LOG=""
+    fi
+    return 0
+}
+# <<< fullscreen ui <<<
+
+# Colours from Terminal Wrapped's themes.
+UI_THEME="59 13 87|18 3 31|255 95 210|255 184 107"
+UI_BRAND="github.com/ethembeldagli/termwrapped"
 
 # Show paths under $HOME as ~/...
 tilde() {
@@ -371,6 +752,70 @@ menu() { # sets ACTION from the person's choice
 
 # --- main -------------------------------------------------------------------
 
+# The menu, full screen and in colour, when the terminal can show it. Sets
+# ACTION, then runs it on a progress screen.
+fullscreen_menu() {
+    # shellcheck disable=SC2016 # expanded when the script exits
+    UI_CLEANUP='rm -rf "$TMP"'
+    ui_start
+    UI_TITLE="Terminal Wrapped" UI_RIGHT="installer"
+    UI_SUB="Spotify Wrapped, but for your terminal"
+    if [ -z "$current" ]; then
+        UI_LINES="info|Installed|not yet|dim${UI_NL}info|Latest|${latest:-unknown (offline?)}|"
+        UI_OPTS="i|Install Terminal Wrapped${latest:+ $latest}|${UI_NL}q|Quit|"
+        UI_SEL=1
+    else
+        newer=0
+        if [ -n "$latest" ] && older "$current" "$latest"; then newer=1; fi
+        if [ -z "$latest" ]; then
+            UI_LINES="info|Installed|$current  (couldn't check for updates)|"
+        elif [ "$newer" = 1 ]; then
+            UI_LINES="info|Installed|$current  → $latest available|warn"
+        else
+            UI_LINES="info|Installed|$current  ✓ up to date|good"
+        fi
+        UI_LINES="$UI_LINES${UI_NL}info|Command|$(tilde "$BIN_DIR")/termwrapped|"
+        UI_OPTS=""
+        if [ "$newer" = 1 ]; then UI_OPTS="u|Update to $latest|$UI_NL"; fi
+        UI_OPTS="${UI_OPTS}i|Reinstall|${UI_NL}d|Delete Terminal Wrapped|${UI_NL}q|Quit|"
+        if [ "$newer" = 1 ]; then UI_SEL=1; else UI_SEL=$(printf '%s\n' "$UI_OPTS" | grep -c ''); fi
+    fi
+    ui_choose
+    case "$UI_CHOICE" in
+        i)
+            ACTION="install"
+            if [ -z "$current" ]; then title="Installing Terminal Wrapped${latest:+ $latest}"; else title="Reinstalling Terminal Wrapped"; fi
+            ;;
+        u) ACTION="update" title="Updating Terminal Wrapped to $latest" ;;
+        d)
+            if ui_ask "Delete Terminal Wrapped?" "Your share cards in ~/Pictures stay where they are." n; then
+                ACTION="uninstall" title="Removing Terminal Wrapped"
+            else
+                ACTION="quit"
+            fi
+            ;;
+        *) ACTION="quit" ;;
+    esac
+    if [ "$ACTION" = "quit" ]; then
+        ui_stop
+        printf '  Nothing changed.\n\n'
+        return 0
+    fi
+    if ui_run "$title" perform; then
+        ui_finish
+    else
+        status=$?
+        ui_finish
+        exit "$status"
+    fi
+    if [ "$RUN" = 1 ]; then
+        rm -rf "$TMP"
+        trap - EXIT
+        if [ -r /dev/tty ]; then exec "$BIN_DIR/termwrapped" </dev/tty; else exec "$BIN_DIR/termwrapped"; fi
+    fi
+    return 0
+}
+
 main() {
     ACTION=""
     RUN=0
@@ -453,10 +898,18 @@ main() {
         fi
     fi
 
+    if [ -z "$ACTION" ] && interactive && ui_supported; then
+        fullscreen_menu
+        return
+    fi
     if [ -z "$ACTION" ]; then
         if interactive; then menu; else ACTION="install"; fi
     fi
+    perform
+}
 
+# Everything after the choice: install, update, check or remove.
+perform() {
     case "$ACTION" in
         quit)
             printf '  Nothing changed.\n\n'
@@ -494,7 +947,8 @@ main() {
         command_name="$(tilde "$target")"
     fi
 
-    if [ "$RUN" = 1 ]; then
+    # shellcheck disable=SC2031 # set only inside the full-screen job
+    if [ "$RUN" = 1 ] && [ -z "${UI_IN_JOB:-}" ]; then
         rm -rf "$TMP"
         trap - EXIT
         printf '\n'
