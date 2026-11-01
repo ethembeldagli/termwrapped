@@ -51,6 +51,8 @@ jobs:
         run: |
           sh install.sh --from . --bin-dir /tmp/twbin
           /tmp/twbin/termwrapped --version
+          sh install.sh --from . --bin-dir /tmp/twbin --check | grep "Up to date"
+          sh install.sh --from . --bin-dir /tmp/twbin --update | grep "Already up to date"
           sh install.sh --uninstall --bin-dir /tmp/twbin
           test ! -e /tmp/twbin/termwrapped
       - name: install.sh from GitHub, like curl | sh
@@ -59,6 +61,7 @@ jobs:
           if command -v curl >/dev/null || command -v wget >/dev/null; then
             cat install.sh | sh
             termwrapped --version
+            sh install.sh --check
           else
             echo "This image has no curl or wget: check we explain that clearly."
             ! sh install.sh 2>/tmp/err.txt

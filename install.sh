@@ -5,6 +5,8 @@
 #
 # Options (when piping, pass them after `sh -s --`):
 #   --run            start termwrapped as soon as it's installed
+#   --check          is there a newer version? (changes nothing)
+#   --update         install only if there's a newer version
 #   --version TAG    install a specific release, e.g. v0.1.0
 #   --bin-dir DIR    where the command goes (default ~/.local/bin, /usr/local/bin as root)
 #   --uninstall      remove termwrapped
@@ -58,6 +60,8 @@ Terminal Wrapped installer
 
 Options:
   --run            start termwrapped as soon as it's installed
+  --check          is there a newer version? (changes nothing)
+  --update         install only if there's a newer version
   --version TAG    install a specific release, e.g. v0.1.0
   --bin-dir DIR    where the command goes (default ~/.local/bin, /usr/local/bin as root)
   --uninstall      remove termwrapped
@@ -203,6 +207,41 @@ fetch() {
     ok
 }
 
+# --- versions -----------------------------------------------------------------
+
+installed_version() {
+    if [ -x "$BIN_DIR/termwrapped" ]; then
+        v="$("$BIN_DIR/termwrapped" --version 2>/dev/null)" || return 0
+        printf '%s' "${v#termwrapped }"
+    fi
+}
+
+# The newest version: the latest release if there is one, otherwise the main branch.
+latest_version() {
+    if [ -n "$FROM" ]; then
+        init="$FROM/termwrapped/__init__.py"
+    else
+        if [ -z "$VERSION" ] && download "https://api.github.com/repos/$REPO/releases/latest" "$TMP/release.json" 2>/dev/null; then
+            tag="$("$PY" -c 'import json, sys; print(json.load(open(sys.argv[1])).get("tag_name", ""))' "$TMP/release.json" 2>/dev/null)"
+            if [ -n "$tag" ]; then printf '%s' "${tag#v}"; return 0; fi
+        fi
+        ref="main"
+        [ -n "$VERSION" ] && ref="$VERSION"
+        init="$TMP/init.py"
+        download "https://raw.githubusercontent.com/$REPO/$ref/termwrapped/__init__.py" "$init" 2>/dev/null || return 1
+    fi
+    "$PY" -c 'import re, sys
+m = re.search(r"__version__ = \"([^\"]+)\"", open(sys.argv[1]).read())
+print(m.group(1) if m else "")' "$init" 2>/dev/null
+}
+
+# Succeeds if version $1 is older than $2.
+older() {
+    "$PY" -c 'import sys
+f = lambda v: tuple(int(p) for p in v.lstrip("v").split(".") if p.isdigit())
+sys.exit(0 if f(sys.argv[1]) < f(sys.argv[2]) else 1)' "$1" "$2"
+}
+
 # --- install / uninstall ----------------------------------------------------
 
 install_files() {
@@ -294,6 +333,8 @@ main() {
         case "$1" in
             --run) RUN=1 ;;
             --uninstall) ACTION="uninstall" ;;
+            --check) ACTION="check" ;;
+            --update) ACTION="update" ;;
             --version | --bin-dir | --from)
                 [ $# -ge 2 ] || die "$1 needs a value."
                 case "$1" in
@@ -348,6 +389,30 @@ main() {
     trap 'rm -rf "$TMP"' EXIT
     trap 'exit 130' INT TERM
 
+    one_liner="curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh"
+    if [ "$ACTION" = "check" ] || [ "$ACTION" = "update" ]; then
+        step "checking for updates"
+        latest="$(latest_version)" || latest=""
+        [ -n "$latest" ] || die "Couldn't find the latest version." "Check your internet connection and try again."
+        current="$(installed_version)"
+        ok "latest is $latest"
+        if [ "$ACTION" = "check" ]; then
+            if [ -z "$current" ]; then
+                printf '\n  Terminal Wrapped is not installed yet. Install it with:\n    %s\n\n' "$one_liner"
+            elif older "$current" "$latest"; then
+                printf '\n  %s%sUpdate available:%s %s → %s%s%s. Update with:\n    %s -s -- --update\n\n' \
+                    "$B" "$YEL" "$R" "$current" "$B" "$latest" "$R" "$one_liner"
+            else
+                printf '\n  %s%sUp to date.%s You have Terminal Wrapped %s.\n\n' "$B" "$GRN" "$R" "$current"
+            fi
+            return
+        fi
+        if [ -n "$current" ] && ! older "$current" "$latest"; then
+            printf '\n  %s%sAlready up to date%s (Terminal Wrapped %s). Nothing to do.\n\n' "$B" "$GRN" "$R" "$current"
+            return
+        fi
+    fi
+
     fetch
     install_files
 
@@ -365,7 +430,8 @@ main() {
         printf '\n'
         if [ -r /dev/tty ]; then exec "$target" </dev/tty; else exec "$target"; fi
     fi
-    printf '\n  Unwrap your year:  %s%s%s\n\n' "$B" "$command_name" "$R"
+    printf '\n  Unwrap your year:  %s%s%s\n' "$B" "$command_name" "$R"
+    printf '  %sCheck for updates any time:  %s -s -- --check%s\n\n' "$D" "$one_liner" "$R"
 }
 
 main "$@"
