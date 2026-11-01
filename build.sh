@@ -1,13 +1,20 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Build a single-file, dependency-free executable: dist/termwrapped.pyz
 # Anyone with Python 3.9+ can run it:  python3 termwrapped.pyz
-set -euo pipefail
+# Plain POSIX sh + Python only, so it builds on minimal images too.
+set -eu
 cd "$(dirname "$0")"
+python3 - <<'EOF'
+import os
+import shutil
+import tempfile
+import zipapp
 
-stage="$(mktemp -d)"
-trap 'rm -rf "$stage"' EXIT
-mkdir -p dist
-cp -r termwrapped "$stage/"
-find "$stage" -name '__pycache__' -prune -exec rm -rf {} +
-python3 -m zipapp "$stage" -o dist/termwrapped.pyz -m "termwrapped.cli:main" -p "/usr/bin/env python3" -c
-echo "built dist/termwrapped.pyz ($(du -h dist/termwrapped.pyz | cut -f1))"
+with tempfile.TemporaryDirectory() as stage:
+    shutil.copytree("termwrapped", os.path.join(stage, "termwrapped"),
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    os.makedirs("dist", exist_ok=True)
+    zipapp.create_archive(stage, "dist/termwrapped.pyz", interpreter="/usr/bin/env python3",
+                          main="termwrapped.cli:main", compressed=True)
+print(f"built dist/termwrapped.pyz ({os.path.getsize('dist/termwrapped.pyz') // 1024} KB)")
+EOF
