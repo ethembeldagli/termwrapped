@@ -3,7 +3,9 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/ethembeldagli/termwrapped/main/install.sh | sh
 #
-# Options (when piping, pass them after `sh -s --`):
+# Run it and pick: install, update or delete. For scripts, skip the menu with an
+# option (when piping, pass them after `sh -s --`):
+#   --install        install or reinstall
 #   --run            start termwrapped as soon as it's installed
 #   --check          is there a newer version? (changes nothing)
 #   --update         install only if there's a newer version
@@ -56,9 +58,11 @@ usage() {
 Terminal Wrapped installer
 
   curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh
-  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- [options]
 
-Options:
+Run it and choose: install, update or delete.
+
+To skip the menu (scripts, CI), add an option after  sh -s --
+  --install        install or reinstall
   --run            start termwrapped as soon as it's installed
   --check          is there a newer version? (changes nothing)
   --update         install only if there's a newer version
@@ -320,10 +324,55 @@ path_advice() {
     return 1
 }
 
+# --- the menu ---------------------------------------------------------------
+
+# Can we ask the person a question? (Works even when this script is piped from curl.)
+interactive() {
+    [ -t 1 ] && ( : </dev/tty ) 2>/dev/null
+}
+
+ask() { # prompt -> $answer, read from the keyboard
+    printf '%s' "$1"
+    read -r answer </dev/tty || answer=""
+}
+
+menu() { # sets ACTION from the person's choice
+    printf '\n'
+    if [ -z "$current" ]; then
+        printf '  Terminal Wrapped is not installed yet.\n\n'
+        printf '    %s[i]%s Install Terminal Wrapped%s\n' "$B" "$R" "${latest:+ $latest}"
+        printf '    %s[q]%s Quit\n\n' "$B" "$R"
+        default="i"
+    else
+        if [ -n "$latest" ] && older "$current" "$latest"; then
+            printf '  You have Terminal Wrapped %s. Version %s%s%s is available.\n\n' "$current" "$B" "$latest" "$R"
+            printf '    %s[u]%s Update to %s\n' "$B" "$R" "$latest"
+            default="u"
+        else
+            printf '  You have Terminal Wrapped %s%s.\n\n' "$current" "${latest:+, the latest version}"
+            default="q"
+        fi
+        printf '    %s[i]%s Reinstall\n' "$B" "$R"
+        printf '    %s[d]%s Delete Terminal Wrapped\n' "$B" "$R"
+        printf '    %s[q]%s Quit\n\n' "$B" "$R"
+    fi
+    while :; do
+        ask "  Choose [$default]: "
+        case "${answer:-$default}" in
+            i | I | install | reinstall) ACTION="install"; break ;;
+            u | U | update) if [ -n "$current" ]; then ACTION="update"; break; fi ;;
+            d | D | delete | uninstall | remove) if [ -n "$current" ]; then ACTION="uninstall"; break; fi ;;
+            q | Q | quit | exit | n | N) ACTION="quit"; break ;;
+        esac
+        printf '  Please type one of the letters in brackets.\n'
+    done
+    printf '\n'
+}
+
 # --- main -------------------------------------------------------------------
 
 main() {
-    ACTION="install"
+    ACTION=""
     RUN=0
     VERSION="${TERMWRAPPED_VERSION:-}"
     BIN_DIR="${TERMWRAPPED_BIN_DIR:-}"
@@ -332,6 +381,7 @@ main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --run) RUN=1 ;;
+            --install) ACTION="install" ;;
             --uninstall) ACTION="uninstall" ;;
             --check) ACTION="check" ;;
             --update) ACTION="update" ;;
@@ -390,28 +440,48 @@ main() {
     trap 'exit 130' INT TERM
 
     one_liner="curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh"
-    if [ "$ACTION" = "check" ] || [ "$ACTION" = "update" ]; then
+    current="$(installed_version)"
+    latest=""
+    if [ "$ACTION" != "install" ]; then
         step "checking for updates"
         latest="$(latest_version)" || latest=""
-        [ -n "$latest" ] || die "Couldn't find the latest version." "Check your internet connection and try again."
-        current="$(installed_version)"
-        ok "latest is $latest"
-        if [ "$ACTION" = "check" ]; then
+        if [ -n "$latest" ]; then
+            ok "latest is $latest"
+        else
+            printf '%s!%s couldn'"'"'t check\n' "$YEL" "$R"
+            STEP_OPEN=0
+        fi
+    fi
+
+    if [ -z "$ACTION" ]; then
+        if interactive; then menu; else ACTION="install"; fi
+    fi
+
+    case "$ACTION" in
+        quit)
+            printf '  Nothing changed.\n\n'
+            return ;;
+        uninstall)
+            uninstall
+            return ;;
+        check)
+            [ -n "$latest" ] || die "Couldn't find the latest version." "Check your internet connection and try again."
             if [ -z "$current" ]; then
                 printf '\n  Terminal Wrapped is not installed yet. Install it with:\n    %s\n\n' "$one_liner"
             elif older "$current" "$latest"; then
-                printf '\n  %s%sUpdate available:%s %s → %s%s%s. Update with:\n    %s -s -- --update\n\n' \
+                printf '\n  %s%sUpdate available:%s %s → %s%s%s. Run the installer again to update:\n    %s\n\n' \
                     "$B" "$YEL" "$R" "$current" "$B" "$latest" "$R" "$one_liner"
             else
                 printf '\n  %s%sUp to date.%s You have Terminal Wrapped %s.\n\n' "$B" "$GRN" "$R" "$current"
             fi
-            return
-        fi
-        if [ -n "$current" ] && ! older "$current" "$latest"; then
-            printf '\n  %s%sAlready up to date%s (Terminal Wrapped %s). Nothing to do.\n\n' "$B" "$GRN" "$R" "$current"
-            return
-        fi
-    fi
+            return ;;
+        update)
+            [ -n "$latest" ] || die "Couldn't find the latest version." "Check your internet connection and try again."
+            if [ -n "$current" ] && ! older "$current" "$latest"; then
+                printf '  %s%sAlready up to date%s (Terminal Wrapped %s). Nothing to do.\n\n' "$B" "$GRN" "$R" "$current"
+                return
+            fi ;;
+    esac
 
     fetch
     install_files
@@ -431,7 +501,7 @@ main() {
         if [ -r /dev/tty ]; then exec "$target" </dev/tty; else exec "$target"; fi
     fi
     printf '\n  Unwrap your year:  %s%s%s\n' "$B" "$command_name" "$R"
-    printf '  %sCheck for updates any time:  %s -s -- --check%s\n\n' "$D" "$one_liner" "$R"
+    printf '  %sTo update or remove it later, run the same command again.%s\n\n' "$D" "$R"
 }
 
 main "$@"

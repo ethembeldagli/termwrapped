@@ -60,13 +60,10 @@ Install and start it straight away:
 curl -fsSL https://raw.githubusercontent.com/ethembeldagli/termwrapped/main/install.sh | sh -s -- --run
 ```
 
-Update, check or uninstall with the same one-liner:
+**Update or uninstall:** run the same command again. It shows what you have, whether there's a newer
+version, and lets you pick **install, update or delete**.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ethembeldagli/termwrapped/main/install.sh | sh -s -- --check      # newer version?
-curl -fsSL https://raw.githubusercontent.com/ethembeldagli/termwrapped/main/install.sh | sh -s -- --update     # update if so
-curl -fsSL https://raw.githubusercontent.com/ethembeldagli/termwrapped/main/install.sh | sh -s -- --uninstall
-```
+For scripts, skip the menu with `sh -s -- --install`, `--update`, `--uninstall` or `--check`.
 
 Other installer options: `--run`, `--version v0.1.0`, `--bin-dir DIR`.
 Like to read scripts before piping them into a shell? Good habit:
