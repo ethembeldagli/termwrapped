@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  distros:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 22.04
+            image: ubuntu:22.04
+            setup: apt-get update -q && apt-get install -yq python3 git
+          - name: Debian 12
+            image: debian:12
+            setup: apt-get update -q && apt-get install -yq python3 git
+          - name: Fedora
+            image: fedora:latest
+            setup: dnf install -yq python3 git
+          - name: Arch Linux
+            image: archlinux:latest
+            setup: pacman -Syu --noconfirm --needed python git
+          - name: openSUSE Tumbleweed
+            image: opensuse/tumbleweed:latest
+            setup: zypper -n install python3 git
+          - name: Alpine (musl)
+            image: alpine:latest
+            setup: apk add --no-cache python3 git
+          - name: Python 3.9 (oldest supported)
+            image: python:3.9-slim
+            setup: apt-get update -q && apt-get install -yq git
+    steps:
+      - name: Install Python and git
+        run: ${{ matrix.setup }}
+      - uses: actions/checkout@v4
+      - name: Tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Build single-file release
+        run: sh build.sh
+      - name: Run the release on a demo home
+        run: |
+          python3 tests/fixtures.py /tmp/demo
+          HOME=/tmp/demo python3 dist/termwrapped.pyz --year 2025 --plain --card /tmp/card.svg
+          test -s /tmp/card.svg
