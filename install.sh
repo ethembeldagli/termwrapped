@@ -617,7 +617,7 @@ ui_celebrate() {
         while read -r _ui_sy _ui_sx _ui_phase; do
             [ -n "$_ui_sy" ] || continue
             _ui_t=$((_ui_frame - _ui_phase))
-            [ "$_ui_t" -ge 0 ] && [ "$_ui_t" -lt 9 ] || continue
+            if [ "$_ui_t" -lt 0 ] || [ "$_ui_t" -ge 9 ]; then continue; fi
             _ui_glow=$((_ui_t < 3 ? (_ui_t + 1) * 33 : (9 - _ui_t) * 16))
             case $_ui_t in 0 | 8) _ui_star="·" ;; 1 | 7) _ui_star="⋆" ;; 2 | 6) _ui_star="✧" ;; *) _ui_star="✦" ;; esac
             if [ $(((_ui_sx + _ui_sy) % 2)) = 0 ]; then _ui_col=$UI_ACC; else _ui_col=$UI_ACC2; fi
