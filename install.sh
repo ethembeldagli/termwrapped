@@ -47,21 +47,20 @@ die() {
 has() { command -v "$1" >/dev/null 2>&1; }
 
 # >>> fullscreen ui >>>
-# A full-screen, full-colour menu in the style of Terminal Wrapped's slides,
-# shared by the ethembeldagli installers. When the terminal can't show it
-# (too small, no colour, not interactive) the plain text menu is used instead.
+# A full-screen, full-colour, animated menu in the style of Terminal Wrapped's
+# slides, shared by the ethembeldagli installers. When the terminal can't show
+# it (too small, no colour, not interactive) the plain text menu is used
+# instead. INSTALLER_NO_ANIMATION=1 keeps the colours but skips the motion.
 # UI_THEME is "TOP|BOTTOM|ACCENT|ACCENT2", each colour as "R G B".
 
 UI_ESC=$(printf '\033')
 UI_CR=$(printf '\r')
 UI_NL='
 '
-UI_ACTIVE=0
-UI_CLEANUP=""
-UI_LOG=""
-UI_SEL=1
-UI_TRUE=0 UI_STTY="" UI_PREPARED="" UI_KEY="" UI_CHOICE="" UI_TICK=0
-UI_TITLE="" UI_RIGHT="" UI_SUB="" UI_LINES="" UI_OPTS="" UI_FOOT="" UI_BRAND=""
+UI_ACTIVE=0 UI_ANIM=0 UI_TRUE=0 UI_SHOWN=0
+UI_CLEANUP="" UI_LOG="" UI_STTY="" UI_PREPARED="" UI_KEY="" UI_CHOICE=""
+UI_SEL=1 UI_TICK=0 UI_FADE=0 UI_SLIDE=0 UI_BARFADE=100 UI_SHINE=-99 UI_BG_LEVEL=100
+UI_TITLE="" UI_RIGHT="" UI_SUB="" UI_LINES="" UI_OPTS="" UI_FOOT="" UI_BRAND="" UI_SPARKS=""
 
 # ui_supported: can this terminal show the full-screen menu?
 ui_supported() {
@@ -76,7 +75,10 @@ ui_supported() {
     ( : </dev/tty ) 2>/dev/null || return 1
     command -v stty >/dev/null 2>&1 && command -v dd >/dev/null 2>&1 || return 1
     ui_size || return 1
-    [ "$UI_COLS" -ge 60 ] && [ "$UI_ROWS" -ge 20 ]
+    [ "$UI_COLS" -ge 60 ] && [ "$UI_ROWS" -ge 20 ] || return 1
+    # Motion needs a sleep that takes fractions of a second.
+    if [ -z "${INSTALLER_NO_ANIMATION:-}" ] && sleep 0.01 2>/dev/null; then UI_ANIM=1; fi
+    return 0
 }
 
 ui_size() {
@@ -84,6 +86,11 @@ ui_size() {
     UI_ROWS=${_ui_size% *} UI_COLS=${_ui_size#* }
     case "$UI_ROWS$UI_COLS" in '' | *[!0-9]*) return 1 ;; esac
     [ "$UI_ROWS" -gt 0 ]
+}
+
+ui_nap() {
+    [ "$UI_ANIM" = 1 ] && sleep "$1" 2>/dev/null
+    return 0
 }
 
 # ui_sgr 38|48 R G B -> UI_C, the escape for that foreground/background colour
@@ -95,16 +102,39 @@ ui_sgr() {
     fi
 }
 
-# ui_mix "R G B" "R G B" STEP STEPS -> _ui_r _ui_g _ui_b
+# ui_mix "R G B" "R G B" STEP STEPS -> _ui_r _ui_g _ui_b and _ui_rgb
 ui_mix() {
     # shellcheck disable=SC2086 # split the colours into their parts
     set -- $1 $2 "$3" "$4"
     _ui_r=$(($1 + ($4 - $1) * $7 / $8))
     _ui_g=$(($2 + ($5 - $2) * $7 / $8))
     _ui_b=$(($3 + ($6 - $3) * $7 / $8))
+    _ui_rgb="$_ui_r $_ui_g $_ui_b"
 }
 
-# ui_prepare: colours for this theme and terminal size.
+# ui_spaces N -> _ui_sp, N spaces
+ui_spaces() {
+    _ui_sp=""
+    _ui_sn=$1
+    while [ "$_ui_sn" -gt 0 ]; do _ui_sp="$_ui_sp "; _ui_sn=$((_ui_sn - 1)); done
+    return 0
+}
+
+# ui_lines TEXT -> _ui_cnt, its number of lines
+ui_lines() {
+    _ui_cnt=0
+    _ui_rest=$1
+    [ -n "$_ui_rest" ] || return 0
+    _ui_cnt=1
+    while :; do
+        case "$_ui_rest" in
+            *"$UI_NL"*) _ui_rest=${_ui_rest#*"$UI_NL"} && _ui_cnt=$((_ui_cnt + 1)) ;;
+            *) return 0 ;;
+        esac
+    done
+}
+
+# ui_prepare: geometry and colours for this theme and terminal size.
 ui_prepare() {
     _ui_old_ifs=$IFS
     IFS='|'
@@ -112,43 +142,70 @@ ui_prepare() {
     set -- $UI_THEME
     IFS=$_ui_old_ifs
     UI_TOP=$1 UI_BOTTOM=$2 UI_ACC=$3 UI_ACC2=$4
-    _ui_y=1
-    while [ "$_ui_y" -le "$UI_ROWS" ]; do
-        ui_mix "$UI_TOP" "$UI_BOTTOM" "$((_ui_y - 1))" "$((UI_ROWS > 1 ? UI_ROWS - 1 : 1))"
-        ui_sgr 48 "$_ui_r" "$_ui_g" "$_ui_b"
-        eval "UI_BG_$_ui_y=\$UI_C"
-        _ui_y=$((_ui_y + 1))
-    done
-    ui_sgr 38 240 240 255 && UI_FG_C=$UI_C
-    ui_mix "240 240 255" "$UI_TOP" 45 100 && ui_sgr 38 "$_ui_r" "$_ui_g" "$_ui_b" && UI_DIM_C=$UI_C
-    # shellcheck disable=SC2086
-    ui_sgr 38 $UI_ACC && UI_ACC_C=$UI_C
-    # shellcheck disable=SC2086
-    ui_sgr 38 $UI_ACC2 && UI_ACC2_C=$UI_C
-    ui_sgr 38 124 255 178 && UI_GOOD_C=$UI_C
-    ui_sgr 38 255 206 92 && UI_WARN_C=$UI_C
-    ui_sgr 38 255 112 120 && UI_BAD_C=$UI_C
-    # shellcheck disable=SC2086
-    ui_sgr 48 $UI_ACC && UI_BAR_BG=$UI_C
-    # shellcheck disable=SC2086
-    ui_sgr 38 $UI_BOTTOM && UI_BAR_FG=$UI_C
-    UI_BLANK=""
-    _ui_x=0
-    while [ "$_ui_x" -lt "$UI_COLS" ]; do UI_BLANK="$UI_BLANK "; _ui_x=$((_ui_x + 1)); done
+    ui_mix "$UI_TOP" "$UI_BOTTOM" 1 2 && UI_MID=$_ui_rgb
+    ui_mix "240 240 255" "$UI_TOP" 45 100 && UI_DIM_RGB=$_ui_rgb
+    ui_spaces "$UI_COLS" && UI_BLANK=$_ui_sp
     UI_W=$((UI_COLS - 8))
     [ "$UI_W" -gt 66 ] && UI_W=66
     UI_X=$(((UI_COLS - UI_W) / 2 + 1))
     UI_PREPARED="$UI_ROWS:$UI_COLS"
+    ui_bg_level "$UI_BG_LEVEL"
+    ui_fade "$UI_FADE"
+    return 0
+}
+
+# ui_bg_level PERCENT: the gradient, faded in from black by PERCENT.
+ui_bg_level() {
+    UI_BG_LEVEL=$1
+    _ui_y=1
+    while [ "$_ui_y" -le "$UI_ROWS" ]; do
+        ui_mix "$UI_TOP" "$UI_BOTTOM" "$((_ui_y - 1))" "$((UI_ROWS > 1 ? UI_ROWS - 1 : 1))"
+        ui_mix "0 0 0" "$_ui_rgb" "$1" 100
+        ui_sgr 48 "$_ui_r" "$_ui_g" "$_ui_b"
+        eval "UI_BG_$_ui_y=\$UI_C"
+        _ui_y=$((_ui_y + 1))
+    done
+    return 0
+}
+
+# ui_colour NAME "R G B": set NAME to that text colour, faded in by UI_FADE.
+ui_colour() {
+    ui_mix "$UI_MID" "$2" "$UI_FADE" 100
+    ui_sgr 38 "$_ui_r" "$_ui_g" "$_ui_b"
+    eval "$1=\$UI_C"
+}
+
+# ui_fade PERCENT: text colours, faded in from the background by PERCENT.
+ui_fade() {
+    UI_FADE=$1
+    ui_colour UI_FG_C "240 240 255"
+    ui_colour UI_DIM_C "$UI_DIM_RGB"
+    ui_colour UI_ACC_C "$UI_ACC"
+    ui_colour UI_ACC2_C "$UI_ACC2"
+    ui_colour UI_GOOD_C "124 255 178"
+    ui_colour UI_WARN_C "255 206 92"
+    ui_colour UI_BAD_C "255 112 120"
+    ui_bar "$UI_BARFADE"
+    return 0
+}
+
+# ui_bar PERCENT: the colour of the selection bar, faded in by PERCENT.
+ui_bar() {
+    UI_BARFADE=$1
+    ui_mix "$UI_MID" "$UI_ACC" "$((UI_FADE * $1 / 100))" 100
+    ui_sgr 48 "$_ui_r" "$_ui_g" "$_ui_b" && UI_BAR_BG=$UI_C
+    ui_mix "240 240 255" "$UI_BOTTOM" "$1" 100
+    ui_sgr 38 "$_ui_r" "$_ui_g" "$_ui_b" && UI_BAR_FG=$UI_C
     return 0
 }
 
 ui_start() {
     [ "$UI_ACTIVE" = 1 ] && return 0
     UI_STTY=$(stty -g </dev/tty)
-    stty -echo -icanon min 0 time 5 </dev/tty
+    stty -echo -icanon min 0 time 1 </dev/tty
     printf '%s[?1049h%s[?25l%s[?7l' "$UI_ESC" "$UI_ESC" "$UI_ESC"
-    UI_ACTIVE=1
-    UI_PREPARED=""
+    UI_ACTIVE=1 UI_SHOWN=0 UI_PREPARED="" UI_FADE=0
+    if [ "$UI_ANIM" = 1 ]; then UI_BG_LEVEL=0; else UI_BG_LEVEL=100; fi
     trap 'ui_stop; eval "${UI_CLEANUP:-:}"' EXIT
     trap 'ui_stop; exit 130' INT TERM HUP
     return 0
@@ -170,9 +227,53 @@ ui_put() {
     UI_FRAME="$UI_FRAME${UI_ESC}[$1;$2H$_ui_bg$3"
 }
 
+# The gradient rule under the title. It draws itself in as the text fades in,
+# and a light sweeps along it at UI_SHINE.
+ui_rule() {
+    _ui_rule=""
+    _ui_len=$((UI_W * UI_FADE / 100))
+    _ui_i=0
+    while [ "$_ui_i" -lt "$_ui_len" ]; do
+        ui_mix "$UI_ACC" "$UI_ACC2" "$_ui_i" "$UI_W"
+        _ui_d=$((_ui_i - UI_SHINE))
+        [ "$_ui_d" -lt 0 ] && _ui_d=$((-_ui_d))
+        if [ "$_ui_d" -lt 8 ]; then ui_mix "$_ui_rgb" "255 255 255" "$((8 - _ui_d))" 11; fi
+        ui_mix "$UI_MID" "$_ui_rgb" "$UI_FADE" 100
+        ui_sgr 38 "$_ui_r" "$_ui_g" "$_ui_b"
+        _ui_rule="$_ui_rule$UI_C━"
+        _ui_i=$((_ui_i + 1))
+    done
+    return 0
+}
+
+# A loading bar with a bright stripe gliding back and forth.
+ui_loader() {
+    _ui_seg=14
+    _ui_span=$((UI_W - _ui_seg))
+    _ui_pos=$((UI_TICK * 2 % (2 * _ui_span)))
+    [ "$_ui_pos" -gt "$_ui_span" ] && _ui_pos=$((2 * _ui_span - _ui_pos))
+    ui_mix "$UI_MID" "$UI_DIM_RGB" "$((UI_FADE * 35 / 100))" 100
+    ui_sgr 38 "$_ui_r" "$_ui_g" "$_ui_b" && _ui_track=$UI_C
+    _ui_load=""
+    _ui_i=0
+    while [ "$_ui_i" -lt "$UI_W" ]; do
+        if [ "$_ui_i" -ge "$_ui_pos" ] && [ "$_ui_i" -lt "$((_ui_pos + _ui_seg))" ]; then
+            ui_mix "$UI_ACC" "$UI_ACC2" "$((_ui_i - _ui_pos))" "$_ui_seg"
+            ui_mix "$UI_MID" "$_ui_rgb" "$UI_FADE" 100
+            ui_sgr 38 "$_ui_r" "$_ui_g" "$_ui_b"
+            _ui_load="$_ui_load$UI_C━"
+        else
+            _ui_load="$_ui_load$_ui_track─"
+        fi
+        _ui_i=$((_ui_i + 1))
+    done
+    return 0
+}
+
 # ui_draw: draw UI_TITLE, UI_SUB, UI_LINES, UI_OPTS and UI_FOOT, centred on the
-# gradient. UI_LINES holds "info|label|value|tone", "text|tone|text",
-# "log|text", "spin|text" or "blank" lines; UI_OPTS holds "key|label|hint".
+# gradient, faded by UI_FADE and shifted by UI_SLIDE rows. UI_LINES holds
+# "info|label|value|tone", "text|tone|text", "big|tone|text", "log|text",
+# "spin|text", "load" or "blank" lines; UI_OPTS holds "key|label|hint".
 ui_draw() {
     ui_size || return 0
     [ "$UI_PREPARED" = "$UI_ROWS:$UI_COLS" ] || ui_prepare
@@ -183,82 +284,94 @@ ui_draw() {
         _ui_y=$((_ui_y + 1))
     done
 
+    ui_lines "$UI_LINES" && _ui_nlines=$_ui_cnt
+    ui_lines "$UI_OPTS" && _ui_nopts=$_ui_cnt
     _ui_count=4
-    [ -n "$UI_LINES" ] && _ui_count=$((_ui_count + $(printf '%s\n' "$UI_LINES" | grep -c '') + 1))
-    [ -n "$UI_OPTS" ] && _ui_count=$((_ui_count + $(printf '%s\n' "$UI_OPTS" | grep -c '') + 1))
+    [ "$_ui_nlines" -gt 0 ] && _ui_count=$((_ui_count + _ui_nlines + 1))
+    [ "$_ui_nopts" -gt 0 ] && _ui_count=$((_ui_count + _ui_nopts + 1))
     [ -n "$UI_FOOT" ] && _ui_count=$((_ui_count + 2))
     _ui_y=$(((UI_ROWS - _ui_count) / 2 + 1))
     [ "$_ui_y" -lt 2 ] && _ui_y=2
+    UI_CARD_TOP=$_ui_y UI_CARD_BOTTOM=$((_ui_y + _ui_count))
+    _ui_y=$((_ui_y + UI_SLIDE))
     _ui_x=$UI_X
 
-    # Title, version on the right, subtitle and a gradient rule.
-    ui_put "$_ui_y" "$_ui_x" "$UI_ACC_C${UI_ESC}[1m◆ $UI_FG_C$UI_TITLE${UI_ESC}[22m"
-    if [ -n "$UI_RIGHT" ]; then
-        ui_put "$_ui_y" "$((_ui_x + UI_W - ${#UI_RIGHT}))" "$UI_DIM_C$UI_RIGHT"
-    fi
-    _ui_y=$((_ui_y + 1))
-    ui_put "$_ui_y" "$_ui_x" "$UI_DIM_C$UI_SUB"
-    _ui_y=$((_ui_y + 1))
-    _ui_rule=""
-    _ui_i=0
-    while [ "$_ui_i" -lt "$UI_W" ]; do
-        ui_mix "$UI_ACC" "$UI_ACC2" "$_ui_i" "$UI_W"
-        ui_sgr 38 "$_ui_r" "$_ui_g" "$_ui_b"
-        _ui_rule="$_ui_rule$UI_C━"
-        _ui_i=$((_ui_i + 1))
-    done
-    ui_put "$_ui_y" "$_ui_x" "$_ui_rule"
-    _ui_y=$((_ui_y + 2))
+    if [ "$UI_FADE" -gt 0 ]; then
+        # Title, version on the right, subtitle and the gradient rule.
+        ui_put "$_ui_y" "$_ui_x" "$UI_ACC_C${UI_ESC}[1m◆ $UI_FG_C$UI_TITLE${UI_ESC}[22m"
+        if [ -n "$UI_RIGHT" ]; then
+            ui_put "$_ui_y" "$((_ui_x + UI_W - ${#UI_RIGHT}))" "$UI_DIM_C$UI_RIGHT"
+        fi
+        _ui_y=$((_ui_y + 1))
+        ui_put "$_ui_y" "$_ui_x" "$UI_DIM_C$UI_SUB"
+        _ui_y=$((_ui_y + 1))
+        UI_RULE_Y=$_ui_y
+        ui_rule
+        ui_put "$_ui_y" "$_ui_x" "$_ui_rule"
+        _ui_y=$((_ui_y + 2))
 
-    if [ -n "$UI_LINES" ]; then
-        while IFS='|' read -r _ui_kind _ui_a _ui_b _ui_c; do
-            case "$_ui_kind" in
-                info)
-                    ui_tone "$_ui_c"
-                    _ui_label=$(printf '%-12s' "$_ui_a")
-                    ui_put "$_ui_y" "$_ui_x" "$UI_DIM_C$_ui_label $_ui_tone$_ui_b"
-                    ;;
-                text) ui_tone "$_ui_a" && ui_put "$_ui_y" "$_ui_x" "$_ui_tone$_ui_b" ;;
-                big) ui_tone "$_ui_a" && ui_put "$_ui_y" "$_ui_x" "$_ui_tone${UI_ESC}[1m$_ui_b${UI_ESC}[22m" ;;
-                log) ui_put "$_ui_y" "$((_ui_x + 2))" "$UI_DIM_C$_ui_a" ;;
-                spin)
-                    ui_spinner
-                    ui_put "$_ui_y" "$_ui_x" "$UI_ACC2_C$_ui_spin $UI_FG_C${UI_ESC}[1m$_ui_a${UI_ESC}[22m"
-                    ;;
-            esac
-            _ui_y=$((_ui_y + 1))
-        done <<EOF
+        if [ "$_ui_nlines" -gt 0 ]; then
+            while IFS='|' read -r _ui_kind _ui_a _ui_b _ui_c; do
+                case "$_ui_kind" in
+                    info)
+                        ui_tone "$_ui_c"
+                        ui_spaces "$((12 - ${#_ui_a}))"
+                        ui_put "$_ui_y" "$_ui_x" "$UI_DIM_C$_ui_a$_ui_sp $_ui_tone$_ui_b"
+                        ;;
+                    text) ui_tone "$_ui_a" && ui_put "$_ui_y" "$_ui_x" "$_ui_tone$_ui_b" ;;
+                    big) ui_tone "$_ui_a" && ui_put "$_ui_y" "$_ui_x" "$_ui_tone${UI_ESC}[1m$_ui_b${UI_ESC}[22m" ;;
+                    log) ui_put "$_ui_y" "$((_ui_x + 2))" "$UI_DIM_C$_ui_a" ;;
+                    spin)
+                        ui_spinner
+                        ui_put "$_ui_y" "$_ui_x" "$UI_ACC2_C$_ui_spin $UI_FG_C${UI_ESC}[1m$_ui_a${UI_ESC}[22m"
+                        ;;
+                    load) ui_loader && ui_put "$_ui_y" "$_ui_x" "$_ui_load" ;;
+                esac
+                _ui_y=$((_ui_y + 1))
+            done <<EOF
 $UI_LINES
 EOF
-        _ui_y=$((_ui_y + 1))
-    fi
-
-    if [ -n "$UI_OPTS" ]; then
-        _ui_i=1
-        while IFS='|' read -r _ui_key _ui_label _ui_hint; do
-            _ui_text="$_ui_label${_ui_hint:+  $_ui_hint}"
-            _ui_pad=$((UI_W - ${#_ui_text} - 7))
-            [ "$_ui_pad" -lt 1 ] && _ui_pad=1
-            if [ "$_ui_i" = "$UI_SEL" ]; then
-                ui_put "$_ui_y" "$_ui_x" "$UI_BAR_BG$UI_BAR_FG${UI_ESC}[1m ▸ $_ui_label${UI_ESC}[22m${_ui_hint:+  $_ui_hint}$(printf "%${_ui_pad}s" '')$_ui_key   "
-            else
-                ui_put "$_ui_y" "$_ui_x" "   $UI_FG_C$_ui_label$UI_DIM_C${_ui_hint:+  $_ui_hint}$(printf "%${_ui_pad}s" '')$_ui_key"
-            fi
-            _ui_i=$((_ui_i + 1))
             _ui_y=$((_ui_y + 1))
-        done <<EOF
+        fi
+
+        if [ "$_ui_nopts" -gt 0 ]; then
+            _ui_i=1
+            while IFS='|' read -r _ui_key _ui_label _ui_hint; do
+                _ui_text="$_ui_label${_ui_hint:+  $_ui_hint}"
+                _ui_pad=$((UI_W - ${#_ui_text} - 7))
+                [ "$_ui_pad" -lt 1 ] && _ui_pad=1
+                ui_spaces "$_ui_pad"
+                if [ "$_ui_i" = "$UI_SEL" ]; then
+                    ui_put "$_ui_y" "$_ui_x" "$UI_BAR_BG$UI_BAR_FG${UI_ESC}[1m ▸ $_ui_label${UI_ESC}[22m${_ui_hint:+  $_ui_hint}$_ui_sp$_ui_key   "
+                else
+                    ui_put "$_ui_y" "$_ui_x" "   $UI_FG_C$_ui_label$UI_DIM_C${_ui_hint:+  $_ui_hint}$_ui_sp$_ui_key"
+                fi
+                _ui_i=$((_ui_i + 1))
+                _ui_y=$((_ui_y + 1))
+            done <<EOF
 $UI_OPTS
 EOF
-        _ui_y=$((_ui_y + 1))
-    fi
+            _ui_y=$((_ui_y + 1))
+        fi
 
-    if [ -n "$UI_FOOT" ]; then
-        _ui_y=$((_ui_y + 1))
-        ui_put "$_ui_y" "$_ui_x" "$UI_DIM_C$UI_FOOT"
+        if [ -n "$UI_FOOT" ]; then
+            _ui_y=$((_ui_y + 1))
+            ui_put "$_ui_y" "$_ui_x" "$UI_DIM_C$UI_FOOT"
+        fi
     fi
-    if [ -n "$UI_BRAND" ] && [ "$_ui_y" -lt "$((UI_ROWS - 1))" ]; then
+    if [ -n "$UI_BRAND" ] && [ "$UI_BG_LEVEL" -ge 100 ] && [ "$UI_CARD_BOTTOM" -lt "$((UI_ROWS - 1))" ]; then
         ui_put "$UI_ROWS" "$(((UI_COLS - ${#UI_BRAND}) / 2 + 1))" "$UI_DIM_C$UI_BRAND"
     fi
+    printf '%s%s' "$UI_FRAME" "$UI_SPARKS"
+    return 0
+}
+
+# Redraw just the rule, for the light sweeping along it.
+ui_draw_rule() {
+    [ "$UI_ANIM" = 1 ] && [ "$UI_FADE" -ge 100 ] && [ -n "${UI_RULE_Y:-}" ] || return 0
+    UI_FRAME=""
+    ui_rule
+    ui_put "$UI_RULE_Y" "$UI_X" "$_ui_rule"
     printf '%s' "$UI_FRAME"
     return 0
 }
@@ -277,24 +390,75 @@ ui_tone() {
 }
 
 ui_spinner() {
-    case $((${UI_TICK:-0} % 10)) in
+    case $((UI_TICK % 10)) in
         0) _ui_spin="⠋" ;; 1) _ui_spin="⠙" ;; 2) _ui_spin="⠹" ;; 3) _ui_spin="⠸" ;; 4) _ui_spin="⠼" ;;
         5) _ui_spin="⠴" ;; 6) _ui_spin="⠦" ;; 7) _ui_spin="⠧" ;; 8) _ui_spin="⠇" ;; *) _ui_spin="⠏" ;;
     esac
     return 0
 }
 
-# ui_key: wait up to half a second for a key; sets UI_KEY to up, down, enter,
-# esc, char:X or "" when nothing was pressed.
+# ui_show: bring the current screen in. The first one fades the gradient up
+# from black; every one slides up a little while its text fades in.
+ui_show() {
+    ui_size || return 0
+    [ "$UI_PREPARED" = "$UI_ROWS:$UI_COLS" ] || ui_prepare
+    if [ "$UI_ANIM" = 1 ]; then
+        if [ "$UI_SHOWN" = 0 ]; then
+            ui_fade 0
+            for _ui_lvl in 12 28 46 64 80 92 100; do
+                ui_bg_level "$_ui_lvl" && ui_draw && ui_nap 0.03
+            done
+        fi
+        for _ui_step in "15 3" "35 2" "55 2" "75 1" "90 1"; do
+            ui_fade "${_ui_step% *}"
+            UI_SLIDE=${_ui_step#* }
+            ui_draw
+            ui_nap 0.025
+        done
+    fi
+    UI_SHOWN=1 UI_SLIDE=0
+    [ "$UI_BG_LEVEL" = 100 ] || ui_bg_level 100
+    ui_fade 100
+    ui_draw
+    return 0
+}
+
+# ui_hide: fade the current screen's text out, sliding it up.
+ui_hide() {
+    if [ "$UI_ANIM" != 1 ] || [ "$UI_FADE" = 0 ]; then
+        UI_FADE=0
+        return 0
+    fi
+    for _ui_step in "70 0" "40 -1" "15 -1" "0 -2"; do
+        ui_fade "${_ui_step% *}"
+        UI_SLIDE=${_ui_step#* }
+        ui_draw
+        ui_nap 0.025
+    done
+    UI_SLIDE=0
+    return 0
+}
+
+# ui_key: wait a moment for a key; sets UI_KEY to up, down, enter, esc,
+# char:X or "" when nothing was pressed.
 ui_key() {
     _ui_k=$(dd bs=1 count=1 2>/dev/null </dev/tty; echo .)
     _ui_k=${_ui_k%.}
     case "$_ui_k" in
         "") UI_KEY="" ;;
         "$UI_ESC")
-            stty min 0 time 1 </dev/tty
-            _ui_seq=$(dd bs=8 count=1 2>/dev/null </dev/tty)
-            stty min 0 time 5 </dev/tty
+            # Read the rest of the key's sequence one byte at a time, so keys
+            # typed quickly one after another aren't swallowed together.
+            _ui_seq=""
+            _ui_kn=0
+            while [ "$_ui_kn" -lt 8 ]; do
+                _ui_c=$(dd bs=1 count=1 2>/dev/null </dev/tty)
+                [ -n "$_ui_c" ] || break
+                _ui_seq="$_ui_seq$_ui_c"
+                _ui_kn=$((_ui_kn + 1))
+                [ "$_ui_kn" -gt 1 ] || continue
+                case "$_ui_c" in [A-Za-z~]) break ;; esac
+            done
             case "$_ui_seq" in
                 "[A" | OA) UI_KEY=up ;;
                 "[B" | OB) UI_KEY=down ;;
@@ -308,56 +472,81 @@ ui_key() {
     return 0
 }
 
+# ui_move N: move the selection to option N, fading the bar in.
+ui_move() {
+    UI_SEL=$1
+    if [ "$UI_ANIM" = 1 ]; then
+        ui_bar 45 && ui_draw && ui_nap 0.02
+    fi
+    ui_bar 100
+    ui_draw
+    return 0
+}
+
 # ui_choose: show the menu until something is picked; sets UI_CHOICE to the
 # key of the option, or "esc".
 ui_choose() {
-    _ui_n=$(printf '%s\n' "$UI_OPTS" | grep -c '')
+    ui_lines "$UI_OPTS" && _ui_n=$_ui_cnt
     [ "$UI_SEL" -ge 1 ] && [ "$UI_SEL" -le "$_ui_n" ] || UI_SEL=1
     UI_FOOT="↑↓ move · enter select · or press a key"
-    ui_draw
+    UI_SHINE=-99
+    ui_show
     while :; do
         _ui_before="$UI_ROWS:$UI_COLS"
         ui_key
         case "$UI_KEY" in
-            "") ui_size && [ "$UI_ROWS:$UI_COLS" != "$_ui_before" ] && ui_draw ;;
-            up) UI_SEL=$((UI_SEL > 1 ? UI_SEL - 1 : _ui_n)) && ui_draw ;;
-            down) UI_SEL=$((UI_SEL < _ui_n ? UI_SEL + 1 : 1)) && ui_draw ;;
+            "")
+                if ui_size && [ "$UI_ROWS:$UI_COLS" != "$_ui_before" ]; then
+                    ui_draw
+                elif [ "$UI_ANIM" = 1 ]; then
+                    # Every few seconds a light sweeps along the rule.
+                    UI_SHINE=$((UI_SHINE + 4))
+                    [ "$UI_SHINE" -gt "$((UI_W + 260))" ] && UI_SHINE=-12
+                    [ "$UI_SHINE" -le "$((UI_W + 12))" ] && ui_draw_rule
+                fi
+                ;;
+            up) ui_move "$((UI_SEL > 1 ? UI_SEL - 1 : _ui_n))" ;;
+            down) ui_move "$((UI_SEL < _ui_n ? UI_SEL + 1 : 1))" ;;
             enter)
                 UI_CHOICE=$(printf '%s\n' "$UI_OPTS" | sed -n "${UI_SEL}p" | cut -d'|' -f1)
-                return 0
+                break
                 ;;
-            esc) UI_CHOICE=esc && return 0 ;;
+            esc) UI_CHOICE=esc && break ;;
             char:*)
                 _ui_letter=${UI_KEY#char:}
                 if printf '%s\n' "$UI_OPTS" | grep -q "^$_ui_letter|"; then
                     UI_CHOICE=$_ui_letter
-                    return 0
+                    break
                 fi
                 case "$_ui_letter" in
-                    k) UI_SEL=$((UI_SEL > 1 ? UI_SEL - 1 : _ui_n)) && ui_draw ;;
-                    j) UI_SEL=$((UI_SEL < _ui_n ? UI_SEL + 1 : 1)) && ui_draw ;;
+                    k) ui_move "$((UI_SEL > 1 ? UI_SEL - 1 : _ui_n))" ;;
+                    j) ui_move "$((UI_SEL < _ui_n ? UI_SEL + 1 : 1))" ;;
                 esac
                 ;;
         esac
     done
+    UI_SHINE=-99
+    return 0
 }
 
 # ui_ask QUESTION DETAIL DEFAULT(y|n): a full-screen yes/no question.
 ui_ask() {
+    ui_hide
     _ui_saved_lines=$UI_LINES _ui_saved_opts=$UI_OPTS _ui_saved_sel=$UI_SEL
     UI_LINES="big|accent2|$1"
     [ -n "$2" ] && UI_LINES="$UI_LINES${UI_NL}text||$2"
     UI_OPTS="y|Yes|${UI_NL}n|No|"
     if [ "$3" = y ]; then UI_SEL=1; else UI_SEL=2; fi
     ui_choose
+    ui_hide
     UI_LINES=$_ui_saved_lines UI_OPTS=$_ui_saved_opts UI_SEL=$_ui_saved_sel
     [ "$UI_CHOICE" = y ]
 }
 
 # ui_busy TEXT: a full-screen "please wait" while something quick runs.
 ui_busy() {
-    UI_LINES="spin|$1" UI_OPTS="" UI_FOOT=""
-    ui_draw
+    UI_LINES="spin|$1${UI_NL}load" UI_OPTS="" UI_FOOT=""
+    ui_show
     return 0
 }
 
@@ -367,18 +556,22 @@ ui_run() {
     _ui_title=$1
     shift
     UI_LOG=$(mktemp "${TMPDIR:-/tmp}/installer.XXXXXX") || return 1
+    ui_hide
     # The job can't touch the screen: it runs with the full-screen view marked
     # inactive and its questions answered by their defaults.
     # shellcheck disable=SC2030,SC2034 # UI_IN_JOB is only for the job, read by the installers' own functions
     (UI_ACTIVE=0 UI_IN_JOB=1 && "$@") </dev/null >"$UI_LOG" 2>&1 &
     _ui_pid=$!
-    UI_TICK=0
-    UI_OPTS="" UI_FOOT=""
+    UI_TICK=0 UI_OPTS="" UI_FOOT=""
+    _ui_log=$(ui_log_lines)
+    UI_LINES="spin|$_ui_title${UI_NL}load$_ui_log"
+    ui_show
     while kill -0 "$_ui_pid" 2>/dev/null; do
-        UI_LINES="spin|$_ui_title$(ui_log_lines)"
+        if [ $((UI_TICK % 5)) = 0 ]; then _ui_log=$(ui_log_lines); fi
+        UI_LINES="spin|$_ui_title${UI_NL}load$_ui_log"
         ui_draw
         UI_TICK=$((UI_TICK + 1))
-        sleep 0.12 2>/dev/null || sleep 1
+        sleep 0.06 2>/dev/null || sleep 1
     done
     _ui_status=0
     wait "$_ui_pid" || _ui_status=$?
@@ -389,28 +582,89 @@ ui_run() {
     fi
     UI_FOOT="Press any key to close"
     ui_draw
+    if [ "$_ui_status" = 0 ]; then ui_celebrate; fi
     UI_KEY=""
     while [ -z "$UI_KEY" ]; do ui_key; done
     return "$_ui_status"
 }
 
-# The last lines of the log, without colours, as "log|..." lines.
-ui_log_lines() {
-    _ui_max=$((UI_ROWS - 16))
-    [ "$_ui_max" -gt 10 ] && _ui_max=10
-    [ "$_ui_max" -lt 3 ] && _ui_max=3
-    printf '\nblank'
-    tail -n 40 "$UI_LOG" 2>/dev/null | tr "$UI_CR" '\n' \
-        | sed -e "s/$UI_ESC\[[0-9;?]*[A-Za-z]//g" -e 's/^ *//' -e '/^$/d' -e 's/|/¦/g' \
-        | fold -s -w "$((UI_W - 4))" | sed -e 's/^ *//' -e '/^$/d' \
-        | tail -n "$_ui_max" | sed -e 's/^/log|/' \
-        | while IFS= read -r _ui_line; do printf '\n%s' "$_ui_line"; done
+# A burst of sparkles across the gradient, like the end of a Wrapped slide.
+ui_celebrate() {
+    [ "$UI_ANIM" = 1 ] || return 0
+    _ui_seed=$(($$ * 7919 % 2147483647 + 1))
+    _ui_stars=""
+    _ui_i=0
+    _ui_tries=0
+    while [ "$_ui_i" -lt 34 ] && [ "$_ui_tries" -lt 400 ]; do
+        _ui_tries=$((_ui_tries + 1))
+        _ui_seed=$(((_ui_seed * 1103515245 + 12345) % 2147483648))
+        _ui_sy=$((_ui_seed / 7 % UI_ROWS + 1))
+        _ui_seed=$(((_ui_seed * 1103515245 + 12345) % 2147483648))
+        _ui_sx=$((_ui_seed / 7 % (UI_COLS - 1) + 1))
+        _ui_phase=$((_ui_seed / 13 % 7))
+        # Keep the card and the bottom line clear.
+        [ "$_ui_sy" -lt "$((UI_ROWS - 1))" ] || continue
+        if [ "$_ui_sy" -ge "$((UI_CARD_TOP - 1))" ] && [ "$_ui_sy" -le "$((UI_CARD_BOTTOM + 1))" ] \
+            && [ "$_ui_sx" -ge "$((UI_X - 2))" ] && [ "$_ui_sx" -le "$((UI_X + UI_W + 1))" ]; then
+            continue
+        fi
+        _ui_stars="$_ui_stars$_ui_sy $_ui_sx $_ui_phase$UI_NL"
+        _ui_i=$((_ui_i + 1))
+    done
+    _ui_frame=0
+    while [ "$_ui_frame" -lt 16 ]; do
+        UI_SPARKS=""
+        while read -r _ui_sy _ui_sx _ui_phase; do
+            [ -n "$_ui_sy" ] || continue
+            _ui_t=$((_ui_frame - _ui_phase))
+            [ "$_ui_t" -ge 0 ] && [ "$_ui_t" -lt 9 ] || continue
+            _ui_glow=$((_ui_t < 3 ? (_ui_t + 1) * 33 : (9 - _ui_t) * 16))
+            case $_ui_t in 0 | 8) _ui_star="·" ;; 1 | 7) _ui_star="⋆" ;; 2 | 6) _ui_star="✧" ;; *) _ui_star="✦" ;; esac
+            if [ $(((_ui_sx + _ui_sy) % 2)) = 0 ]; then _ui_col=$UI_ACC; else _ui_col=$UI_ACC2; fi
+            ui_mix "$UI_MID" "$_ui_col" "$_ui_glow" 100
+            ui_sgr 38 "$_ui_r" "$_ui_g" "$_ui_b"
+            _ui_bg=""
+            eval "_ui_bg=\$UI_BG_$_ui_sy"
+            UI_SPARKS="$UI_SPARKS${UI_ESC}[$_ui_sy;${_ui_sx}H$_ui_bg$UI_C$_ui_star"
+        done <<EOF
+$_ui_stars
+EOF
+        ui_draw
+        ui_nap 0.05
+        _ui_frame=$((_ui_frame + 1))
+    done
+    UI_SPARKS=""
+    ui_draw
     return 0
 }
 
-# ui_finish: leave the full-screen view and print what the last ui_run did,
-# so it stays in the terminal's scrollback.
+# The last lines of the log, without colours, as "log|..." lines, padded to a
+# fixed height so the card doesn't jump as lines arrive.
+ui_log_lines() {
+    _ui_max=$((UI_ROWS - 17))
+    [ "$_ui_max" -gt 10 ] && _ui_max=10
+    [ "$_ui_max" -lt 3 ] && _ui_max=3
+    _ui_got=$(tail -n 40 "$UI_LOG" 2>/dev/null | tr "$UI_CR" '\n' \
+        | sed -e "s/$UI_ESC\[[0-9;?]*[A-Za-z]//g" -e 's/^ *//' -e '/^$/d' -e 's/|/¦/g' \
+        | fold -s -w "$((UI_W - 4))" | sed -e 's/^ *//' -e '/^$/d' \
+        | tail -n "$_ui_max" | sed -e 's/^/log|/')
+    ui_lines "$_ui_got"
+    printf '\nblank'
+    [ -n "$_ui_got" ] && printf '\n%s' "$_ui_got"
+    while [ "$_ui_cnt" -lt "$_ui_max" ]; do printf '\nblank'; _ui_cnt=$((_ui_cnt + 1)); done
+    return 0
+}
+
+# ui_finish: fade out, leave the full-screen view and print what the last
+# ui_run did, so it stays in the terminal's scrollback.
 ui_finish() {
+    # shellcheck disable=SC2031 # the job's own copy of UI_ACTIVE doesn't matter here
+    if [ "$UI_ACTIVE" = 1 ] && [ "$UI_ANIM" = 1 ]; then
+        ui_hide
+        for _ui_lvl in 75 50 25 0; do
+            ui_bg_level "$_ui_lvl" && ui_draw && ui_nap 0.025
+        done
+    fi
     ui_stop
     if [ -n "$UI_LOG" ] && [ -f "$UI_LOG" ]; then
         printf '\n'
@@ -797,7 +1051,7 @@ fullscreen_menu() {
         *) ACTION="quit" ;;
     esac
     if [ "$ACTION" = "quit" ]; then
-        ui_stop
+        ui_finish
         printf '  Nothing changed.\n\n'
         return 0
     fi
