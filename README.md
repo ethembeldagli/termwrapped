@@ -4,15 +4,16 @@
 
 **Spotify Wrapped, but for your Linux terminal.**
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/ethembeldagli/termwrapped/main/install.sh | sh
+termwrapped
+```
+
 <img src="docs/example-card.png" alt="Example share card: The Vim Monk" width="420" align="right">
 
 Run one command and get an animated year-in-review of your shell, git, packages
 and games, plus your *terminal personality*, ending with a share card for
 r/linux, r/unixporn or wherever you post.
-
-```
-$ termwrapped
-```
 
 - **Animated slideshow in the terminal**: full-screen gradients, pixel-font numbers, count-ups
 - **Your terminal personality**: The Sudo Sorcerer, The Eternal Tinkerer, The Vim Monk, The Proton Pilgrim…
@@ -47,11 +48,7 @@ Any Linux with **Python 3.9+**. CI runs the tests on every push on
 
 ## Install
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ethembeldagli/termwrapped/main/install.sh | sh
-```
-
-Then run `termwrapped`. That's it: one file in `~/.local/bin`, no sudo, no pip.
+The one-liner at the top puts a single file in `~/.local/bin`: no sudo, no pip.
 It needs Python 3.9+, which almost every distro already has (the installer
 tells you the exact command if yours doesn't).
 
