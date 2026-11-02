@@ -7,6 +7,4 @@ dist/
 demo-home/
 terminal-wrapped-*.png
 terminal-wrapped-*.svg
-site/node_modules/
-site/dist/
 .claude/
